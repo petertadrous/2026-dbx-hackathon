@@ -127,6 +127,45 @@ def test_nfhs_not_applicable_when_no_maternity_signal(nfhs_minimal, district_to_
     assert out.iloc[0]["result"] == TestResult.NOT_APPLICABLE.value
 
 
+# @spec EE-NFHS-002, EE-NFHS-003
+def test_nfhs_normalizes_case_and_punctuation_across_sources():
+    """Case + punctuation drift between sources should not break the join.
+
+    True spelling drift (Mysore↔Mysuru, post-2022 carve-outs) is deferred
+    to the Defender's reconciliation layer per E8.
+    """
+    nfhs_df = pd.DataFrame(
+        [
+            {"district": "BENGALURU URBAN", "state": "Karnataka",
+             "institutional_delivery_rate": 30.0},
+            {"district": "Mysuru", "state": "Karnataka",
+             "institutional_delivery_rate": 95.0},
+            {"district": "Hassan", "state": "Karnataka",
+             "institutional_delivery_rate": 70.0},
+            {"district": "Bidar", "state": "Karnataka",
+             "institutional_delivery_rate": 50.0},
+        ]
+    )
+    facilities = pd.DataFrame(
+        [
+            {
+                "facility_id": "DRIFT",
+                "capability": ["Maternity"],
+                "description": "",
+                "spatial_district": "Bengaluru-Urban",  # ADM2 variant
+            }
+        ]
+    )
+    out = nfhs.run_nfhs_test(
+        facilities, nfhs_df,
+        {"Bengaluru-Urban": "Karnataka", "Mysuru": "Karnataka",
+         "Hassan": "Karnataka", "Bidar": "Karnataka"},
+    )
+    # 30.0 is below Karnataka Q25 — should fail, not indeterminate
+    assert out.iloc[0]["result"] == TestResult.FAIL.value
+    assert out.iloc[0]["evidence_ref"]["state"] == "Karnataka"
+
+
 # @spec EE-NFHS-001
 def test_nfhs_test_name(nfhs_minimal, district_to_state):
     facilities = pd.DataFrame(

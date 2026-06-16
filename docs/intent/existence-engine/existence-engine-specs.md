@@ -23,7 +23,7 @@ prefix: EE
 
 ### Test 2 — MinHash Near-Duplicate Detection
 
-- [ ] **EE-HASH-001**: The system shall compute 128-permutation MinHash signatures for each facility using the concatenated text of the `capability`, `procedure`, and `equipment` fields (shingle size 5, character-level), storing the signature as BYTEA in `cache.description_minhash`.
+- [ ] **EE-HASH-001**: The system shall compute 128-permutation MinHash signatures for each facility using the concatenated text of the `capability`, `procedure`, and `equipment` fields (shingle size 5, character-level), storing the signature as BYTEA in `cache.claim_minhash`.
 - [ ] **EE-HASH-002**: When the concatenated `capability` + `procedure` + `equipment` text is absent or contains fewer than 30 tokens, the system shall record Test 2 as `indeterminate`.
 - [ ] **EE-HASH-003**: The system shall compute connected-component clusters of facilities using flood-fill: two facilities are in the same cluster if their pairwise Jaccard similarity is ≥ 0.9; clustering is transitive (if A~B and B~C then A, B, C are one cluster even if A~C < 0.9).
 - [ ] **EE-HASH-004**: When a facility belongs to a connected-component cluster of size ≥ 3 (i.e., the facility plus ≥ 2 others), the system shall record Test 2 as `fail` with the cluster's facility IDs as `evidence_ref`.
@@ -33,7 +33,7 @@ prefix: EE
 
 - [ ] **EE-SPATIAL-001**: The system shall assign each facility with non-null `latitude`/`longitude` to a district via point-in-polygon spatial join against geoBoundaries ADM2 India district polygons.
 - [ ] **EE-SPATIAL-002**: When `ST_Contains` / `ST_Point` is unavailable on Free Edition, the system shall fall back to GeoPandas `sjoin` in-process.
-- [ ] **EE-SPATIAL-003**: For each facility with both a successful spatial-join district and a parseable PIN, the system shall look up the modal India Post district for that PIN (after `(pincode, district)` dedup) and compare to the spatial-join district after lowercase-and-strip normalization.
+- [ ] **EE-SPATIAL-003**: For each facility with both a successful spatial-join district and a parseable PIN, the system shall look up the modal India Post district for that PIN (after `(pincode, district)` dedup) and compare to the spatial-join district after lowercase-and-strip normalization. When the modal district holds ≤ 50% of mappings for that PIN ("ambiguous-pin"), the system shall record Test 3 as `indeterminate` with `evidence_ref = {"ambiguous_pin": true, "modal_share": <share>}`.
 - [ ] **EE-SPATIAL-004**: When the spatial-join district and PIN-derived district disagree after normalization, the system shall record Test 3 as `fail` with both district values as `evidence_ref`.
 - [ ] **EE-SPATIAL-005**: When the comparison in EE-SPATIAL-003 agrees, the system shall record Test 3 as `pass`.
 - [ ] **EE-SPATIAL-006**: If a facility has no `latitude`/`longitude` or no parseable PIN, the system shall record Test 3 as `indeterminate`.
@@ -60,7 +60,7 @@ prefix: EE
 - [ ] **EE-ADJ-002**: When any veto-capable test (Test 1 or Test 3) result is `fail`, the system shall record `verdict = phantom` regardless of other test results.
 - [ ] **EE-ADJ-003**: When no veto-capable test is `fail` AND count of tests with `result = fail` among non-veto tests is ≥ 2, the system shall record `verdict = phantom`.
 - [ ] **EE-ADJ-004**: When exactly one non-veto test result is `fail` AND no veto-capable test is `fail` AND count of tests with `result != indeterminate` is ≥ 2, the system shall record `verdict = contested`.
-- [ ] **EE-ADJ-005**: When count of tests with `result != indeterminate` is < 2 (evaluated before EE-ADJ-004), the system shall record `verdict = contested` with a `reason = insufficient-evidence` note in `test_outcome_vector`; EE-ADJ-005 takes precedence over EE-ADJ-004 when both conditions hold.
+- [ ] **EE-ADJ-005**: When the count of tests with `result` in {`pass`, `fail`} is < 2 (evaluated before any other Adjudicator rule), the system shall record `verdict = contested` with `reason = insufficient-evidence` in `test_outcome_vector`; EE-ADJ-005 takes precedence over EE-ADJ-002, EE-ADJ-003, and EE-ADJ-004 when both conditions hold. `not-applicable` and `indeterminate` do not count toward the testable floor.
 - [ ] **EE-ADJ-006**: When count of `fail` results is 0 AND count of `pass` results is ≥ 2, the system shall record `verdict = real`.
 - [ ] **EE-ADJ-007**: The system shall store the full test outcome vector (all five test results and their `evidence_ref` values) as JSONB in `operational.phantom_verdicts.test_outcome_vector`.
 
