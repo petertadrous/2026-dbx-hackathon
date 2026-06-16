@@ -436,21 +436,25 @@ tile_rows: list[dict] = []
 
 for cap in CAPABILITIES:
     cap_scores = desert_scores[desert_scores["capability"] == cap]
-    try:
-        html = build_choropleth(
-            districts, cap_scores,
-            "adjusted_desert_score",
-            f"{cap.title()} desert — phantom adjusted",
-        )
-        tile_rows.append({
-            "capability": cap,
-            "layer_type": "adjusted",
-            "html": html,
-            "rendered_at": ran_at,
-        })
-        print(f"  tile {cap}/adjusted: {len(html):,} chars")
-    except Exception as exc:
-        print(f"  WARN: tile {cap}/adjusted failed — {exc}")
+    for layer_type, score_col, label in [
+        ("raw",      "raw_desert_score",      "raw"),
+        ("adjusted", "adjusted_desert_score", "phantom adjusted"),
+    ]:
+        try:
+            html = build_choropleth(
+                districts, cap_scores,
+                score_col,
+                f"{cap.title()} desert — {label}",
+            )
+            tile_rows.append({
+                "capability": cap,
+                "layer_type": layer_type,
+                "html": html,
+                "rendered_at": ran_at,
+            })
+            print(f"  tile {cap}/{layer_type}: {len(html):,} chars")
+        except Exception as exc:
+            print(f"  WARN: tile {cap}/{layer_type} failed — {exc}")
 
 tiles_df = pd.DataFrame(tile_rows)
 print(f"\ntile_layers: {len(tiles_df)} tiles generated")
