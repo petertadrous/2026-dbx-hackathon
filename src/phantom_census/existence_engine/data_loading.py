@@ -68,11 +68,8 @@ def load_nfhs5(path: Path) -> pd.DataFrame:
 def load_districts(path: Path) -> gpd.GeoDataFrame:
     """Load geoBoundaries India ADM2 polygons.
 
-    geoBoundaries exposes the district name as `shapeName` and the canonical
-    identifier as `shapeID`. This loader keeps `shapeID` (per EE-SPATIAL-001 it
-    is the canonical `district_id` written to facility rows) and aliases
-    `shapeName` to `district` so the engine's NFHS join can match on the
-    human-readable name.
+    geoBoundaries exposes the district name as `shapeName`; this loader renames
+    it to `district` so the engine modules can join uniformly.
     """
     gdf = gpd.read_file(path)
     if "district" not in gdf.columns and "shapeName" in gdf.columns:

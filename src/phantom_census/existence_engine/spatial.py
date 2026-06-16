@@ -30,50 +30,18 @@ def _has_latlon(lat: object, lon: object) -> bool:
 
 # @spec EE-SPATIAL-001, EE-SPATIAL-002
 def assign_districts(facilities: pd.DataFrame, districts: gpd.GeoDataFrame) -> pd.DataFrame:
-    """Point-in-polygon assignment per EE-SPATIAL-001.
-
-    Uses `gpd.sjoin` (R-tree-backed) to do the join in a single vectorized
-    pass — O(n log m) vs the per-facility Python loop's O(n × m). Predicate
-    is `within`, the inverse of `polygon.contains(point)` per shapely's API;
-    output is identical for non-overlapping ADM2 districts. When a point
-    lies on a shared edge (rare; the predicate is closed on shared boundaries),
-    the first matching polygon in the districts frame wins, matching the
-    pre-vectorization `iloc[0]` semantics.
-
-    Writes two columns on the facility row:
-      * `spatial_district` — geoBoundaries `shapeName` (human-readable district),
-        used by the NFHS join and the side-panel render.
-      * `district_id` — geoBoundaries `shapeID`, the canonical identifier per
-        EE-SPATIAL-001. Travels downstream into Lakebase + desert-scoring as the
-        district key.
-    """
     out = facilities.copy()
-    out["spatial_district"] = None
-    out["district_id"] = None
-    has_shape_id = "shapeID" in districts.columns
+    spatial_district: list[str | None] = []
 
-    lat = pd.to_numeric(facilities.get("latitude"), errors="coerce")
-    lon = pd.to_numeric(facilities.get("longitude"), errors="coerce")
-    has_latlon_mask = lat.notna() & lon.notna()
-    if not has_latlon_mask.any():
-        return out
+    for _, fac in facilities.iterrows():
+        if not _has_latlon(fac.get("latitude"), fac.get("longitude")):
+            spatial_district.append(None)
+            continue
+        pt = Point(float(fac["longitude"]), float(fac["latitude"]))
+        hit = districts[districts.contains(pt)]
+        spatial_district.append(hit.iloc[0]["district"] if not hit.empty else None)
 
-    fac_subset = facilities.loc[has_latlon_mask].copy()
-    points = gpd.points_from_xy(lon[has_latlon_mask], lat[has_latlon_mask])
-    fac_gdf = gpd.GeoDataFrame(
-        fac_subset, geometry=points, crs=districts.crs or "EPSG:4326",
-    )
-
-    cols = ["district", "geometry"] + (["shapeID"] if has_shape_id else [])
-    joined = gpd.sjoin(
-        fac_gdf, districts[cols], predicate="within", how="left",
-    ).drop_duplicates(subset=["facility_id"], keep="first")
-
-    fid_to_dist = joined.set_index("facility_id")["district"]
-    out["spatial_district"] = out["facility_id"].map(fid_to_dist)
-    if has_shape_id:
-        fid_to_shape = joined.set_index("facility_id")["shapeID"]
-        out["district_id"] = out["facility_id"].map(fid_to_shape)
+    out["spatial_district"] = spatial_district
     return out
 
 
@@ -107,17 +75,8 @@ def run_spatial_test(
     facilities: pd.DataFrame,
     districts: gpd.GeoDataFrame,
     india_post_df: pd.DataFrame,
-    assigned: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Run Test 3.
-
-    When the caller has already produced a `facilities_with_district` frame
-    (e.g. via `assign_districts` upstream in `pipeline.run_engine`), pass it in
-    via `assigned=` to avoid re-running the R-tree spatial join. The frame
-    must carry `spatial_district` and `district_id` columns alongside the
-    original facility data.
-    """
-    assigned = assigned if assigned is not None else assign_districts(facilities, districts)
+    assigned = assign_districts(facilities, districts)
     modal = modal_pin_district(india_post_df).set_index("pincode")
 
     rows: list[dict] = []

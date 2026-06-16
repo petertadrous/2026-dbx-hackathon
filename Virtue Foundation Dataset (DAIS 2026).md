@@ -1,6 +1,40 @@
 # Overview
 The Foundational Data Refresh (FDR) pipeline ingests data from public datasets and websites, applies a medallion architecture, performs GenAI-based information extraction, resolves primary keys across sources, and consolidates disparate records into a single unified row representing each entity.
 
+---
+
+## VF Facilities Table
+
+Unity Catalog path: `databricks_virtue_foundation_dataset_dais_2026.virtue_foundation_dataset.facilities`
+
+Row grain: one row per reported healthcare facility. The sample used in this project is ~10,000 rows, representing approximately 0.5% of the full national dataset.
+
+### Columns
+
+| Raw column | Canonical name (after rename) | Type | Notes |
+|---|---|---|---|
+| `unique_id` | `facility_id` | string | **Not enforced as unique** — duplicate values observed (same physical facility with spelling/address variants). Deduplicate on this key before processing. |
+| `name` | `facility_name` | string | Free text. Contains embedded null bytes (`\x00`) in a subset of rows — strip before writing to any database. |
+| `address_zipOrPostcode` | `pincode` | string | 6-digit India PIN code. Cast to string; treat as categorical, not numeric. Not always a valid 6-digit code. |
+| `address_city` | `address_city` | string | City name as self-reported. Not normalized; varies in spelling and casing. |
+| `address_stateOrRegion` | `address_stateOrRegion` | string | State/UT as self-reported. Does not reliably match the spatial-join district-to-state result. |
+| `latitude` | `latitude` | float | WGS-84. Null or NaN for a subset of rows. Some coordinates are implausible (ocean, neighbouring country). |
+| `longitude` | `longitude` | float | WGS-84. Same nullability as latitude. |
+| `capability` | `capability` | array[string] | Self-declared service capabilities (e.g. `["Maternity", "NICU", "ICU"]`). 99.7% populated. Primary evidence field for existence detection. |
+| `procedure` | `procedure` | array[string] | Specific procedures offered. 99.7% populated. |
+| `equipment` | `equipment` | array[string] | Equipment available. 99.7% populated. |
+| `description` | `description` | string | Free-text narrative. Median ~16 tokens — too short for reliable standalone duplicate detection; used as a supplement to the structured claim fields. May contain URLs (used by the Defender to count distinct registered domains). |
+| `yearEstablished` | `yearEstablished` | int or string | Self-reported founding year. May be a future year, pre-independence year, or missing. Used by the temporal implausibility test. |
+
+### Key data quality findings (observed at runtime)
+
+- `unique_id` is not unique: same ID appears on 2–3 rows for some facilities (different address variants or transliterations). Fix: `drop_duplicates(subset=["facility_id"])` at ingestion.
+- `name` / `facility_name` contains `\x00` bytes: causes `CHARACTER_NOT_IN_REPERTOIRE` in Spark and `ValueError` in psycopg2. Fix: strip null bytes before any write.
+- `pincode` fan-out: a single PIN maps to multiple India Post post offices and potentially multiple districts — use `pin_centroids` (grouped centroid) for distance tests, not a raw join.
+- `capability`, `procedure`, `equipment` arrive as arrays; concatenate for MinHash tokenisation.
+
+See `docs/data-quality-notes.md` for the full issue log and mitigations.
+
 Databricks Marketplace descriptions support only a small subset of markdown: headings (#, ##), bold (**), unordered lists (-), and plain paragraphs. Tables, code spans, horizontal rules, blockquotes, and nested formatting are stripped or broken. Here's a version written for that constraint:
 
 Supplemental Data Sources: India Healthcare Geography & Public Health

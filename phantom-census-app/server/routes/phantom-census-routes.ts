@@ -1,5 +1,7 @@
 import type { Application } from 'express';
 import { z } from 'zod';
+import { DatabricksAdapter } from '@databricks/appkit/beta';
+import type { AgentInput, AgentRunContext } from '@databricks/appkit/beta';
 
 interface AppKitWithLakebase {
   lakebase: {
@@ -82,77 +84,26 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
 
   appkit.server.extend((app) => {
 
-    // ── Bootstrap: summary + district scores + tile layers + scenarios ─────────
-    app.get('/api/planner/bootstrap', async (req, res) => {
+    // ── Summary: fast — stats + scenarios only (no expensive CTE) ─────────────
+    app.get('/api/planner/summary', async (req, res) => {
       const capability = getCapability(req.query.capability);
       const plannerId = getPlannerId(req.query.plannerId);
 
       try {
-        const [summary, scores, tiles, scenarios] = await Promise.all([
-
-          // Aggregate from pre-computed desert_scores (synced from UC gold table).
-          // override_count comes from team.planner_overrides.
+        const [summary, scenarios] = await Promise.all([
           appkit.lakebase.query(
             `
             SELECT
-              COALESCE(SUM(ds.total_count), 0)::INT   AS total_facilities,
-              COALESCE(SUM(ds.phantom_count), 0)::INT  AS phantom_count,
+              COALESCE(SUM(ds.total_count), 0)::INT    AS total_facilities,
+              COALESCE(SUM(ds.phantom_count), 0)::INT   AS phantom_count,
               COALESCE(SUM(ds.contested_count), 0)::INT AS contested_count,
               (SELECT COUNT(DISTINCT facility_id)::INT
-               FROM team.planner_overrides)              AS override_count
+               FROM team.planner_overrides)             AS override_count
             FROM public.desert_scores ds
             WHERE ds.capability = $1
             `,
             [capability],
           ),
-
-          // District scores.  Effective phantom_count folds in planner overrides
-          // so the sidebar stays live without needing to UPDATE the synced table.
-          appkit.lakebase.query(
-            `
-            WITH overrides AS (
-              SELECT DISTINCT ON (facility_id) facility_id, override_type
-              FROM team.planner_overrides
-              ORDER BY facility_id, overridden_at DESC
-            ),
-            verdict_adjustments AS (
-              SELECT
-                pv.district_id,
-                COUNT(*) FILTER (
-                  WHERE COALESCE(o.override_type, pv.verdict) = 'phantom'
-                    OR (o.override_type IS NULL AND pv.verdict = 'phantom')
-                )::INT  AS effective_phantom_count
-              FROM public.phantom_verdicts pv
-              LEFT JOIN overrides o ON o.facility_id = pv.facility_id
-              WHERE pv.district_id IS NOT NULL
-              GROUP BY pv.district_id
-            )
-            SELECT
-              ds.district_id,
-              ds.district_name,
-              ds.state_name,
-              ds.raw_desert_score,
-              ds.adjusted_desert_score,
-              ds.verified_facility_count,
-              COALESCE(va.effective_phantom_count, ds.phantom_count) AS phantom_count,
-              ds.burden_imputed,
-              RANK() OVER (ORDER BY ds.raw_desert_score DESC)::INT      AS raw_rank,
-              RANK() OVER (ORDER BY ds.adjusted_desert_score DESC)::INT AS adjusted_rank
-            FROM public.desert_scores ds
-            LEFT JOIN verdict_adjustments va ON va.district_id = ds.district_id
-            WHERE ds.capability = $1
-            ORDER BY ds.adjusted_desert_score DESC, ds.district_name
-            LIMIT 200
-            `,
-            [capability],
-          ),
-
-          // Pre-rendered Folium HTML tiles (synced from UC gold table).
-          appkit.lakebase.query(
-            `SELECT layer_type, html, rendered_at FROM public.tile_layers WHERE capability = $1`,
-            [capability],
-          ),
-
           appkit.lakebase.query(
             `
             SELECT scenario_id, scenario_name, capability, region_filter, planner_notes, saved_at
@@ -167,19 +118,63 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
 
         res.json({
           capability,
-          summary: summary.rows[0] ?? {
-            total_facilities: 0,
-            phantom_count: 0,
-            contested_count: 0,
-            override_count: 0,
-          },
-          scores: scores.rows,
-          tileLayers: tiles.rows,
+          summary: summary.rows[0] ?? { total_facilities: 0, phantom_count: 0, contested_count: 0, override_count: 0 },
           scenarios: scenarios.rows,
         });
       } catch (err) {
-        console.error('Failed to load planner bootstrap:', err);
-        res.status(500).json({ error: 'Failed to load planner data' });
+        console.error('Failed to load planner summary:', err);
+        res.status(500).json({ error: 'Failed to load summary' });
+      }
+    });
+
+    // ── Tiles: pre-rendered Folium HTML (loaded independently for parallel fetch)
+    app.get('/api/planner/tiles', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+
+      try {
+        const tiles = await appkit.lakebase.query(
+          `SELECT layer_type, html, rendered_at FROM public.tile_layers WHERE capability = $1`,
+          [capability],
+        );
+        res.json({ tileLayers: tiles.rows });
+      } catch (err) {
+        console.error('Failed to load tile layers:', err);
+        res.status(500).json({ error: 'Failed to load tiles' });
+      }
+    });
+
+    // ── Bootstrap: district scores only — simple SELECT on precomputed ranks ───
+    app.get('/api/planner/bootstrap', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+
+      try {
+        const scores = await appkit.lakebase.query(
+          `
+          SELECT
+            district_id,
+            district_name,
+            state_name,
+            raw_desert_score,
+            adjusted_desert_score,
+            verified_facility_count,
+            phantom_count,
+            contested_count,
+            total_count,
+            burden_imputed,
+            raw_rank,
+            adjusted_rank
+          FROM public.desert_scores
+          WHERE capability = $1
+          ORDER BY adjusted_desert_score DESC, district_name
+          LIMIT 200
+          `,
+          [capability],
+        );
+
+        res.json({ capability, scores: scores.rows });
+      } catch (err) {
+        console.error('Failed to load district scores:', err);
+        res.status(500).json({ error: 'Failed to load district scores' });
       }
     });
 
@@ -275,6 +270,117 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
       } catch (err) {
         console.error('Failed to save override:', err);
         res.status(500).json({ error: 'Failed to save override' });
+      }
+    });
+
+    // ── AI Field Verification Brief (SSE stream) ────────────────────────────────
+    app.get('/api/planner/districts/:districtId/brief', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+      const { districtId } = req.params;
+
+      try {
+        const [statsResult, phantomResult] = await Promise.all([
+          appkit.lakebase.query(
+            `SELECT district_name, state_name,
+                    raw_desert_score, adjusted_desert_score,
+                    raw_rank, adjusted_rank,
+                    (raw_rank - adjusted_rank) AS rank_shift,
+                    phantom_count, contested_count, verified_facility_count
+             FROM public.desert_scores
+             WHERE district_id = $1 AND capability = $2`,
+            [districtId, capability],
+          ),
+          appkit.lakebase.query(
+            `SELECT pv.facility_name, pv.facility_id, pv.verdict,
+                    string_agg(DISTINCT fet.test_name || '=' || fet.result, ', ' ORDER BY (fet.test_name || '=' || fet.result)) AS tests
+             FROM public.phantom_verdicts pv
+             LEFT JOIN public.facility_existence_tests fet ON fet.facility_id = pv.facility_id
+             WHERE pv.district_id = $1
+               AND pv.verdict IN ('phantom', 'contested')
+             GROUP BY pv.facility_name, pv.facility_id, pv.verdict
+             ORDER BY pv.verdict DESC
+             LIMIT 25`,
+            [districtId],
+          ),
+        ]);
+
+        const d = statsResult.rows[0];
+        if (!d) {
+          res.status(404).json({ error: 'District not found' });
+          return;
+        }
+
+        const facilityLines = phantomResult.rows
+          .map((f) => `  [${f.verdict}] ${f.facility_name ?? f.facility_id}: ${f.tests ?? 'no tests recorded'}`)
+          .join('\n');
+
+        const userPrompt = `
+District: ${d.district_name}, ${d.state_name}
+Capability: ${capability}
+Verified facilities remaining: ${d.verified_facility_count}
+Phantoms removed: ${d.phantom_count} | Contested: ${d.contested_count}
+Raw desert rank: #${d.raw_rank} → Adjusted rank: #${d.adjusted_rank} (rank shift: ${d.rank_shift} positions more underserved)
+
+Phantom and contested facilities (up to 25):
+${facilityLines || '  none recorded yet'}
+
+Write a Field Verification Brief with exactly these four sections:
+
+## Phantom Pattern
+What failure modes dominate (e.g. "phone_disconnected", "no_activity", "address_not_found")? What does the pattern suggest about the root cause — administrative fraud, facility closure, survey error, or something else?
+
+## Priority Targets
+List the 3 facilities a field team should visit first. Name each one. Explain why each is the highest-value verification target based on its failure evidence.
+
+## Rank-Shift Risk
+If all contested facilities are confirmed phantom, how does this district's adjusted rank change? Frame the policy implication concretely.
+
+## Ministry Recommendation
+One specific, actionable recommendation for the state health ministry — not generic advice.
+`.trim();
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        const adapter = await DatabricksAdapter.fromModelServing('databricks-meta-llama-3-3-70b-instruct', { maxTokens: 900 });
+
+        const input: AgentInput = {
+          messages: [
+            {
+              id: 'sys',
+              role: 'system',
+              content:
+                'You are a public health analyst specialising in India\'s healthcare facility registry. You write precise, evidence-grounded briefs for district planners. Be specific to the numbers given. Never give generic advice.',
+              createdAt: new Date(),
+            },
+            { id: 'usr', role: 'user', content: userPrompt, createdAt: new Date() },
+          ],
+          tools: [],
+          threadId: districtId,
+        };
+
+        const context: AgentRunContext = {
+          executeTool: async () => null,
+        };
+
+        for await (const event of adapter.run(input, context)) {
+          if (req.socket.destroyed) break;
+          if (event.type === 'message_delta') {
+            res.write(`data: ${JSON.stringify({ text: event.content })}\n\n`);
+          }
+        }
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch (err) {
+        console.error('[brief] Failed:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to generate brief' });
+        } else {
+          res.write(`data: ${JSON.stringify({ error: 'Stream interrupted' })}\n\n`);
+          res.end();
+        }
       }
     });
 
