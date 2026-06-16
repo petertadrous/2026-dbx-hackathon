@@ -30,12 +30,12 @@ prefix: DS
 ### Incremental Override Recompute
 
 - [ ] **DS-OVR-001**: When a planner override is saved to Lakebase (affecting one facility), the system shall recompute `adjusted_desert_score` for only the affected district using the updated `phantom_count`.
-- [ ] **DS-OVR-002**: After DS-OVR-001 commits, the Streamlit app shall re-render only the affected district's polygon in the Folium adjusted layer by updating that district's GeoJSON feature color property and triggering a targeted Streamlit component refresh; the full layer HTML string shall not be re-rendered.
+- [ ] **DS-OVR-002** *(stretch)*: After DS-OVR-001 commits, the Streamlit app shall re-render only the affected district's polygon in the Folium adjusted layer by updating that district's GeoJSON feature color property and triggering a targeted Streamlit component refresh; the full layer HTML string shall not be re-rendered. *In the hackathon build the affected district's row is updated in the scores frame in-process and the next batch tile-render pass picks up the change; targeted GeoJSON-feature mutation is post-MVP.*
 - [ ] **DS-OVR-003**: The incremental recompute triggered by DS-OVR-001 shall complete and update the UI within 1 second of the override save.
 - [ ] **DS-OVR-004**: The system shall update the district ranking table to reflect the recomputed score immediately after DS-OVR-001 completes.
 
 ### Phantom Counter Display
 
 - [ ] **DS-CTR-001**: The system shall display a "phantoms removed" counter on the choropleth view showing the total count of facilities with `verdict = phantom` for the currently selected capability and region.
-- [ ] **DS-CTR-002**: When the planner toggles to the adjusted view, the counter shall animate from 0 to the final phantom count over 0.5 seconds.
+- [ ] **DS-CTR-002** *(stretch)*: When the planner toggles to the adjusted view, the counter shall animate from 0 to the final phantom count over 0.5 seconds. *In the hackathon build the counter renders the final value immediately on toggle; explicit animation timing is post-MVP.*
 - [ ] **DS-CTR-003**: The system shall display `token_usage: 0` in the choropleth header panel, reflecting that no LLM calls were made during the scoring pipeline.

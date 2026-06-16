@@ -1,0 +1,120 @@
+"""Batch run — read from Lakebase, compute scores, write back scores + tile layers.
+
+@spec DS-SCORE-001..005, DS-TILE-001, DS-TILE-001a, DS-TILE-002
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import geopandas as gpd
+import pandas as pd
+from sqlalchemy import Engine, text
+
+from .formula import compute_district_scores
+from .tiles import render_tile_html
+
+
+def _load_districts(districts_path: Path) -> gpd.GeoDataFrame:
+    gdf = gpd.read_file(districts_path)
+    if "district_id" not in gdf.columns and "shapeName" in gdf.columns:
+        gdf = gdf.rename(columns={"shapeName": "district_id"})
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+    return gdf
+
+
+def run_desert_scoring(
+    engine: Engine,
+    *,
+    capability: str = "maternity",
+    districts_path: Path,
+    nfhs: pd.DataFrame,
+    ran_at: datetime | None = None,
+) -> int:
+    """Read facilities + verdicts from Lakebase, compute scores, write back.
+
+    Returns the count of district rows written.
+    """
+    ran_at = ran_at or datetime.now(tz=timezone.utc)
+
+    with engine.connect() as conn:
+        facilities = pd.DataFrame(conn.execute(text(
+            "SELECT facility_id, district_id FROM operational.facility_district_xref"
+        )).mappings().all())
+        verdicts = pd.DataFrame(conn.execute(text(
+            "SELECT facility_id, verdict FROM operational.phantom_verdicts"
+        )).mappings().all())
+
+    if facilities.empty or verdicts.empty:
+        return 0
+
+    scores = compute_district_scores(
+        facilities_with_district=facilities,
+        verdicts=verdicts,
+        nfhs=nfhs,
+        capability=capability,
+    )
+
+    # Write scores
+    rows = scores.to_dict(orient="records")
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(
+                text("""
+                    INSERT INTO operational.desert_scores
+                        (district_id, district_name, state_name, capability,
+                         raw_desert_score, adjusted_desert_score,
+                         verified_facility_count, phantom_count,
+                         burden_imputed, updated_at)
+                    VALUES
+                        (:district_id, :district_name, :state_name, :capability,
+                         :raw, :adj, :ver, :ph, :imp, :ts)
+                    ON CONFLICT (district_id, capability) DO UPDATE SET
+                        district_name = EXCLUDED.district_name,
+                        state_name = EXCLUDED.state_name,
+                        raw_desert_score = EXCLUDED.raw_desert_score,
+                        adjusted_desert_score = EXCLUDED.adjusted_desert_score,
+                        verified_facility_count = EXCLUDED.verified_facility_count,
+                        phantom_count = EXCLUDED.phantom_count,
+                        burden_imputed = EXCLUDED.burden_imputed,
+                        updated_at = EXCLUDED.updated_at
+                """),
+                {
+                    "district_id": r["district_id"],
+                    "district_name": r["district_name"],
+                    "state_name": r["state_name"],
+                    "capability": capability,
+                    "raw": float(r["raw_desert_score"]),
+                    "adj": float(r["adjusted_desert_score"]),
+                    "ver": int(r["verified_facility_count"]),
+                    "ph": int(r["phantom_count"]),
+                    "imp": bool(r["burden_imputed"]),
+                    "ts": ran_at,
+                },
+            )
+
+    # Render tile layers
+    districts_gdf = _load_districts(Path(districts_path))
+    raw_html = render_tile_html(districts_gdf, scores,
+                                score_col="raw_desert_score",
+                                capability=capability)
+    adj_html = render_tile_html(districts_gdf, scores,
+                                score_col="adjusted_desert_score",
+                                capability=capability)
+
+    with engine.begin() as conn:
+        for layer_type, html in (("raw", raw_html), ("adjusted", adj_html)):
+            conn.execute(
+                text("""
+                    INSERT INTO cache.tile_layers (capability, layer_type, html, rendered_at)
+                    VALUES (:cap, :lt, :html, :ts)
+                    ON CONFLICT (capability, layer_type) DO UPDATE SET
+                        html = EXCLUDED.html,
+                        rendered_at = EXCLUDED.rendered_at
+                """),
+                {"cap": capability, "lt": layer_type, "html": html, "ts": ran_at},
+            )
+
+    return len(rows)
