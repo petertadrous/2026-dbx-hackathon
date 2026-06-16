@@ -1,5 +1,7 @@
 import type { Application } from 'express';
 import { z } from 'zod';
+import { DatabricksAdapter } from '@databricks/appkit/beta';
+import type { AgentInput, AgentRunContext } from '@databricks/appkit/beta';
 
 interface AppKitWithLakebase {
   lakebase: {
@@ -268,6 +270,117 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
       } catch (err) {
         console.error('Failed to save override:', err);
         res.status(500).json({ error: 'Failed to save override' });
+      }
+    });
+
+    // ── AI Field Verification Brief (SSE stream) ────────────────────────────────
+    app.get('/api/planner/districts/:districtId/brief', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+      const { districtId } = req.params;
+
+      try {
+        const [statsResult, phantomResult] = await Promise.all([
+          appkit.lakebase.query(
+            `SELECT district_name, state_name,
+                    raw_desert_score, adjusted_desert_score,
+                    raw_rank, adjusted_rank,
+                    (raw_rank - adjusted_rank) AS rank_shift,
+                    phantom_count, contested_count, verified_facility_count
+             FROM public.desert_scores
+             WHERE district_id = $1 AND capability = $2`,
+            [districtId, capability],
+          ),
+          appkit.lakebase.query(
+            `SELECT pv.facility_name, pv.facility_id, pv.verdict,
+                    string_agg(DISTINCT fet.test_name || '=' || fet.result, ', ' ORDER BY (fet.test_name || '=' || fet.result)) AS tests
+             FROM public.phantom_verdicts pv
+             LEFT JOIN public.facility_existence_tests fet ON fet.facility_id = pv.facility_id
+             WHERE pv.district_id = $1
+               AND pv.verdict IN ('phantom', 'contested')
+             GROUP BY pv.facility_name, pv.facility_id, pv.verdict
+             ORDER BY pv.verdict DESC
+             LIMIT 25`,
+            [districtId],
+          ),
+        ]);
+
+        const d = statsResult.rows[0];
+        if (!d) {
+          res.status(404).json({ error: 'District not found' });
+          return;
+        }
+
+        const facilityLines = phantomResult.rows
+          .map((f) => `  [${f.verdict}] ${f.facility_name ?? f.facility_id}: ${f.tests ?? 'no tests recorded'}`)
+          .join('\n');
+
+        const userPrompt = `
+District: ${d.district_name}, ${d.state_name}
+Capability: ${capability}
+Verified facilities remaining: ${d.verified_facility_count}
+Phantoms removed: ${d.phantom_count} | Contested: ${d.contested_count}
+Raw desert rank: #${d.raw_rank} → Adjusted rank: #${d.adjusted_rank} (rank shift: ${d.rank_shift} positions more underserved)
+
+Phantom and contested facilities (up to 25):
+${facilityLines || '  none recorded yet'}
+
+Write a Field Verification Brief with exactly these four sections:
+
+## Phantom Pattern
+What failure modes dominate (e.g. "phone_disconnected", "no_activity", "address_not_found")? What does the pattern suggest about the root cause — administrative fraud, facility closure, survey error, or something else?
+
+## Priority Targets
+List the 3 facilities a field team should visit first. Name each one. Explain why each is the highest-value verification target based on its failure evidence.
+
+## Rank-Shift Risk
+If all contested facilities are confirmed phantom, how does this district's adjusted rank change? Frame the policy implication concretely.
+
+## Ministry Recommendation
+One specific, actionable recommendation for the state health ministry — not generic advice.
+`.trim();
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        const adapter = await DatabricksAdapter.fromModelServing('databricks-meta-llama-3-3-70b-instruct', { maxTokens: 900 });
+
+        const input: AgentInput = {
+          messages: [
+            {
+              id: 'sys',
+              role: 'system',
+              content:
+                'You are a public health analyst specialising in India\'s healthcare facility registry. You write precise, evidence-grounded briefs for district planners. Be specific to the numbers given. Never give generic advice.',
+              createdAt: new Date(),
+            },
+            { id: 'usr', role: 'user', content: userPrompt, createdAt: new Date() },
+          ],
+          tools: [],
+          threadId: districtId,
+        };
+
+        const context: AgentRunContext = {
+          executeTool: async () => null,
+        };
+
+        for await (const event of adapter.run(input, context)) {
+          if (req.socket.destroyed) break;
+          if (event.type === 'message_delta') {
+            res.write(`data: ${JSON.stringify({ text: event.content })}\n\n`);
+          }
+        }
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch (err) {
+        console.error('[brief] Failed:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to generate brief' });
+        } else {
+          res.write(`data: ${JSON.stringify({ error: 'Stream interrupted' })}\n\n`);
+          res.end();
+        }
       }
     });
 

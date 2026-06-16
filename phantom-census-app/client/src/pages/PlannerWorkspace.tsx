@@ -129,6 +129,9 @@ export function PlannerWorkspace() {
   const [selectedFacilityId, setSelectedFacilityId] = useState<string | null>(null);
   const [facilityTests, setFacilityTests] = useState<TestEvidence[] | null>(null);
 
+  const [brief, setBrief] = useState('');
+  const [briefLoading, setBriefLoading] = useState(false);
+
   const [reasonNote, setReasonNote] = useState('');
   const [scenarioName, setScenarioName] = useState('');
   const [scenarioNotes, setScenarioNotes] = useState('');
@@ -233,6 +236,44 @@ export function PlannerWorkspace() {
       ),
     [scores],
   );
+
+  // Clear brief when district or capability changes
+  useEffect(() => { setBrief(''); }, [selectedDistrictId, capability]);
+
+  const generateBrief = async () => {
+    if (!selectedDistrictId) return;
+    setBrief('');
+    setBriefLoading(true);
+    try {
+      const response = await fetch(
+        `/api/planner/districts/${encodeURIComponent(selectedDistrictId)}/brief?capability=${capability}`,
+      );
+      if (!response.ok || !response.body) throw new Error(`${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') break;
+          try {
+            const parsed = JSON.parse(payload) as { text?: string; error?: string };
+            if (parsed.text) setBrief((prev) => prev + parsed.text);
+          } catch { /* partial chunk */ }
+        }
+      }
+    } catch (err) {
+      setBrief(`Error: ${err instanceof Error ? err.message : 'Failed to generate brief'}`);
+    } finally {
+      setBriefLoading(false);
+    }
+  };
 
   const saveScenario = async () => {
     if (!scenarioName.trim()) return;
@@ -486,6 +527,40 @@ export function PlannerWorkspace() {
             </CardContent>
           </Card>
 
+          {selectedDistrict && (
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardTitle className="text-sm">AI Verification Brief</CardTitle>
+                <Button
+                  size="sm"
+                  variant={brief ? 'ghost' : 'default'}
+                  onClick={generateBrief}
+                  disabled={briefLoading}
+                >
+                  {briefLoading ? 'Generating…' : brief ? 'Regenerate' : 'Generate Brief'}
+                </Button>
+              </CardHeader>
+              <CardContent>
+                {briefLoading && !brief && (
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-4 w-5/6" />
+                    <Skeleton className="h-4 w-4/6" />
+                  </div>
+                )}
+                {brief ? (
+                  <div className="prose prose-sm max-w-none whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                    {brief}
+                  </div>
+                ) : !briefLoading ? (
+                  <p className="text-sm text-muted-foreground">
+                    Click "Generate Brief" to get an AI-powered field verification plan for this district.
+                  </p>
+                ) : null}
+              </CardContent>
+            </Card>
+          )}
+
           {selectedFacilityId && (
             <Card>
               <CardHeader>
@@ -650,7 +725,7 @@ const MapTile = React.memo(function MapTile({
 }: {
   loading: boolean;
   html: string | undefined;
-  innerRef: React.RefObject<HTMLDivElement>;
+  innerRef: React.RefObject<HTMLDivElement | null>;
 }) {
   if (loading) return <Skeleton className="h-[420px] w-full" />;
   if (html)
