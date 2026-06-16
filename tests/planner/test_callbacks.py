@@ -30,10 +30,9 @@ def test_submit_override_rejects_empty_reason():
 
 
 # @spec PW-OVR-003, PW-OVR-005
-def test_submit_override_calls_save_then_apply():
-    with patch("phantom_census.planner_workspace.callbacks.save_override") as save_, \
-         patch("phantom_census.planner_workspace.callbacks.apply_override") as apply_:
-        save_.return_value = "OID-123"
+def test_submit_override_invokes_single_tx_entry():
+    with patch("phantom_census.planner_workspace.callbacks._submit_override") as inner:
+        inner.return_value = ("OID-123", "BEED")
         out = submit_override(
             engine=object(),
             facility_id="F1",
@@ -43,8 +42,9 @@ def test_submit_override_calls_save_then_apply():
             capability="maternity",
         )
     assert out == "OID-123"
-    save_.assert_called_once()
-    apply_.assert_called_once()
+    inner.assert_called_once()
+    kwargs = inner.call_args.kwargs
+    assert callable(kwargs.get("recompute_fn"))
 
 
 # @spec PW-SCEN-001

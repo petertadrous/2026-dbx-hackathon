@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 def _seed_one_override(engine, sample_engine_outputs, planner_id) -> str:
     from phantom_census.lakebase.writer import load_engine_outputs
-    from phantom_census.lakebase.overrides import save_override, apply_override
+    from phantom_census.lakebase.overrides import submit_override
     load_engine_outputs(sample_engine_outputs, engine,
                         ran_at=datetime(2026, 6, 15, tzinfo=timezone.utc))
     with engine.begin() as conn:
@@ -16,16 +16,20 @@ def _seed_one_override(engine, sample_engine_outputs, planner_id) -> str:
             INSERT INTO operational.desert_scores
             (district_id, district_name, state_name, capability,
              raw_desert_score, adjusted_desert_score,
-             verified_facility_count, phantom_count, burden_imputed, updated_at)
-            VALUES ('BEED','Beed','Maharashtra','maternity',0.6,0.78,12,4,FALSE,NOW())
+             verified_facility_count, phantom_count, burden_imputed,
+             nfhs_missing, burden_weight, max_density, updated_at)
+            VALUES ('BEED','Beed','Maharashtra','maternity',0.6,0.78,12,4,
+                    FALSE, FALSE, 0.3, 80, NOW())
         """))
         conn.execute(text(
             "INSERT INTO operational.facility_district_xref (facility_id, district_id) "
             "VALUES ('F2','BEED')"
         ))
-    oid = save_override(engine, facility_id="F2", override_type="force-real",
-                        reason_note="visited", planner_id=planner_id)
-    apply_override(engine, override_id=oid, recompute_fn=lambda *a, **kw: None)
+    oid, _district = submit_override(
+        engine, facility_id="F2", override_type="force-real",
+        reason_note="visited", planner_id=planner_id,
+        recompute_fn=lambda *a, **kw: None,
+    )
     return oid
 
 

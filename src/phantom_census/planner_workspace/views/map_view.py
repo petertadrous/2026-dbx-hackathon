@@ -45,13 +45,16 @@ def render(engine: Engine, workspace) -> None:
         )
         workspace.view = view
 
-    # @spec PW-MAP-005, PW-MAP-007
+    # @spec PW-MAP-005, PW-MAP-007 — N is invariant on view; the label flips
+    # from "detected" (raw) to "removed" (adjusted) so the narrative still lands
+    # without ever hiding the count.
     scores = get_desert_scores(engine, capability=workspace.capability)
     phantom_total = phantom_counter(scores) if not scores.empty else 0
+    counter_label = "Phantoms removed" if view == "adjusted" else "Phantoms detected"
     with header_cols[2]:
         st.markdown(
-            f"<div class='pc-counter'>Phantoms removed: "
-            f"<strong>{phantom_total if view == 'adjusted' else 0}</strong></div>",
+            f"<div class='pc-counter'>{counter_label}: "
+            f"<strong>{phantom_total}</strong></div>",
             unsafe_allow_html=True,
         )
 

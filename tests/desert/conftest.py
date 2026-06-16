@@ -32,14 +32,15 @@ def small_verdicts() -> pd.DataFrame:
 
 @pytest.fixture
 def small_nfhs() -> pd.DataFrame:
-    """Beed has a low (bottom-quartile) institutional_delivery_rate."""
+    """Beed has a low (bottom-quartile) institutional_delivery_rate.
+    PUN's rate is suppressed (`*`) so DS-SCORE-005 fires."""
     return pd.DataFrame([
         {"district_id": "BEED", "district_name": "Beed", "state_name": "Maharashtra",
          "institutional_delivery_rate": 70.0},
         {"district_id": "MUM",  "district_name": "Mumbai", "state_name": "Maharashtra",
          "institutional_delivery_rate": 95.0},
         {"district_id": "PUN",  "district_name": "Pune", "state_name": "Maharashtra",
-         "institutional_delivery_rate": "*"},  # suppressed → triggers DS-SCORE-005
+         "institutional_delivery_rate": "*"},
     ])
 
 

@@ -10,8 +10,8 @@ from __future__ import annotations
 from sqlalchemy import Engine
 
 from phantom_census.desert_scoring.recompute import recompute_district
-from phantom_census.lakebase.overrides import apply_override, save_override
 from phantom_census.lakebase.scenarios import restore_scenario, save_scenario
+from phantom_census.lakebase.overrides import submit_override as _submit_override
 
 
 # @spec PW-OVR-002, PW-OVR-003, PW-OVR-005
@@ -24,20 +24,18 @@ def submit_override(
     planner_id: str,
     capability: str,
 ) -> str:
+    """Append the audit row, update the verdict, and recompute the district
+    in a single transaction — any failure rolls back all three (LP-OVR-004)."""
     if not reason_note or not reason_note.strip():
         raise ValueError("Reason note is required.")
-    override_id = save_override(
+    override_id, _district = _submit_override(
         engine,
         facility_id=facility_id,
         override_type=override_type,
         reason_note=reason_note,
         planner_id=planner_id,
-    )
-    apply_override(
-        engine,
-        override_id=override_id,
-        recompute_fn=recompute_district,
         capability=capability,
+        recompute_fn=recompute_district,
     )
     return override_id
 

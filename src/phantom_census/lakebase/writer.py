@@ -91,10 +91,11 @@ def _upsert_tests(conn, df: pd.DataFrame) -> None:
                 (facility_id, test_name, result, evidence_ref, ran_at)
             VALUES
                 (:facility_id, :test_name, :result, CAST(:evidence_ref AS JSONB), :ran_at)
-            ON CONFLICT (facility_id, test_name, ran_at)
+            ON CONFLICT (facility_id, test_name)
             DO UPDATE SET
                 result = EXCLUDED.result,
-                evidence_ref = EXCLUDED.evidence_ref
+                evidence_ref = EXCLUDED.evidence_ref,
+                ran_at = EXCLUDED.ran_at
         """),
         rows,
     )

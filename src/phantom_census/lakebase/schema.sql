@@ -17,13 +17,16 @@ CREATE TABLE IF NOT EXISTS operational.phantom_verdicts (
     override_id          VARCHAR(64)
 );
 
+-- PK is (facility_id, test_name) so a re-run of the engine UPSERTS the row
+-- for each test instead of accumulating duplicates per ran_at. The latest
+-- `ran_at` is kept on the row as the freshness column.
 CREATE TABLE IF NOT EXISTS operational.facility_existence_tests (
     facility_id    VARCHAR(64)  NOT NULL,
     test_name      VARCHAR(64)  NOT NULL,
     result         VARCHAR(16)  NOT NULL,
     evidence_ref   JSONB,
     ran_at         TIMESTAMPTZ  NOT NULL,
-    PRIMARY KEY (facility_id, test_name, ran_at)
+    PRIMARY KEY (facility_id, test_name)
 );
 
 CREATE INDEX IF NOT EXISTS facility_existence_tests_fid_idx
@@ -39,6 +42,10 @@ CREATE TABLE IF NOT EXISTS operational.facility_district_xref (
 CREATE INDEX IF NOT EXISTS facility_district_xref_district_idx
     ON operational.facility_district_xref (district_id);
 
+-- `max_density` and `burden_weight` are persisted per row so the single-district
+-- override recompute can read them back instead of fabricating them. Without
+-- these columns a recompute would collapse the global denominator to the
+-- affected district's own facility count, writing 0 for every row.
 CREATE TABLE IF NOT EXISTS operational.desert_scores (
     district_id              VARCHAR(64) NOT NULL,
     district_name            VARCHAR(128) NOT NULL,
@@ -49,6 +56,9 @@ CREATE TABLE IF NOT EXISTS operational.desert_scores (
     verified_facility_count  INTEGER NOT NULL,
     phantom_count            INTEGER NOT NULL,
     burden_imputed           BOOLEAN NOT NULL,
+    nfhs_missing             BOOLEAN NOT NULL DEFAULT FALSE,
+    burden_weight            DOUBLE PRECISION NOT NULL,
+    max_density              DOUBLE PRECISION NOT NULL,
     updated_at               TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (district_id, capability)
 );

@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pandas as pd
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, text
 
 from .formula import compute_district_scores
 
@@ -21,19 +21,22 @@ def recompute_in_memory(
     nfhs: pd.DataFrame,
     capability: str,
     district_id: str,
+    max_density: float | None = None,
 ) -> pd.DataFrame:
     """Pure-Python single-district recompute.
 
-    Recomputes the *whole* score frame on the slice (cheap) but only swaps the
-    one row in `previous_scores` so that consumers (rank table, tile renderer)
-    see a single row delta. The other rows are untouched and pass `==` checks
-    in the test suite.
+    Recomputes the full input slice using the shared `max_density` denominator,
+    then patches only the affected row into `previous_scores`. Callers MUST
+    supply the same `max_density` that was used to build `previous_scores`
+    (otherwise the affected district's new score is no longer comparable to
+    the untouched siblings).
     """
     fresh = compute_district_scores(
         facilities_with_district=facilities_with_district,
         verdicts=verdicts,
         nfhs=nfhs,
         capability=capability,
+        max_density=max_density,
     )
     new_row = fresh[fresh["district_id"] == district_id]
     if new_row.empty:
@@ -43,95 +46,88 @@ def recompute_in_memory(
     mask = out["district_id"] == district_id
     if mask.any():
         for col in new_row.columns:
-            out.loc[mask, col] = new_row.iloc[0][col]
+            if col in out.columns:
+                out.loc[mask, col] = new_row.iloc[0][col]
     else:
         out = pd.concat([out, new_row], ignore_index=True)
     return out
 
 
 # @spec DS-OVR-001, DS-OVR-003
-def recompute_district(engine: Engine, district_id: str, capability: str) -> None:
+def recompute_district(
+    conn: Connection, district_id: str, capability: str
+) -> None:
     """Recompute a single district's row in `operational.desert_scores`.
 
-    Called by `lakebase.overrides.apply_override` as the `recompute_fn` callback.
-    Reads the affected district's facility set, current verdicts, and NFHS
-    indicator from Lakebase; writes the updated row back. The verdict snapshot
-    seen here already reflects the override write that committed in the same
-    transaction.
+    Called by `lakebase.overrides.apply_override` as the `recompute_fn` callback;
+    runs on the caller's already-open Connection so the update participates in
+    the same transaction as the override + verdict update (LP-OVR-004).
+
+    Reads the existing `desert_scores` row to recover `max_density` and
+    `burden_weight` (persisted by the batch run) so the recomputed score stays
+    comparable to the other rows in the table — no fake NFHS placeholders.
     """
-    with engine.connect() as conn:
-        facilities = pd.DataFrame(conn.execute(
+    existing = conn.execute(
+        text(
+            "SELECT district_id, district_name, state_name, "
+            "       burden_weight, burden_imputed, nfhs_missing, max_density "
+            "FROM operational.desert_scores "
+            "WHERE district_id = :did AND capability = :cap"
+        ),
+        {"did": district_id, "cap": capability},
+    ).first()
+    if existing is None:
+        return
+
+    facilities = pd.DataFrame(
+        conn.execute(
             text(
                 "SELECT x.facility_id, x.district_id "
                 "FROM operational.facility_district_xref x "
                 "WHERE x.district_id = :did"
             ),
             {"did": district_id},
-        ).mappings().all())
+        ).mappings().all()
+    )
+    if facilities.empty:
+        return
 
-        if facilities.empty:
-            return
-
-        verdicts = pd.DataFrame(conn.execute(
+    verdicts = pd.DataFrame(
+        conn.execute(
             text(
                 "SELECT facility_id, verdict "
                 "FROM operational.phantom_verdicts "
                 "WHERE facility_id = ANY(:fids)"
             ),
             {"fids": facilities["facility_id"].tolist()},
-        ).mappings().all())
-
-        # NFHS is read from desert_scores's burden flag for now — for a real
-        # recompute we'd query a dedicated NFHS table. Hackathon scope: the
-        # previous score row carries enough context to reproduce burden.
-        existing = conn.execute(
-            text(
-                "SELECT district_id, district_name, state_name, "
-                "       burden_imputed, raw_desert_score, adjusted_desert_score "
-                "FROM operational.desert_scores "
-                "WHERE district_id = :did AND capability = :cap"
-            ),
-            {"did": district_id, "cap": capability},
-        ).first()
-        if existing is None:
-            return
-
-    # Reconstruct a tiny NFHS-like frame so compute_district_scores can run.
-    nfhs = pd.DataFrame([{
-        "district_id": existing.district_id,
-        "district_name": existing.district_name,
-        "state_name": existing.state_name,
-        "institutional_delivery_rate": 70.0,  # placeholder; recovered via burden
-    }])
-
-    fresh = compute_district_scores(
-        facilities_with_district=facilities,
-        verdicts=verdicts,
-        nfhs=nfhs,
-        capability=capability,
+        ).mappings().all()
     )
-    if fresh.empty:
-        return
-    row = fresh.iloc[0]
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                UPDATE operational.desert_scores
-                SET raw_desert_score = :raw,
-                    adjusted_desert_score = :adj,
-                    verified_facility_count = :ver,
-                    phantom_count = :ph,
-                    updated_at = :ts
-                WHERE district_id = :did AND capability = :cap
-            """),
-            {
-                "raw": float(row["raw_desert_score"]),
-                "adj": float(row["adjusted_desert_score"]),
-                "ver": int(row["verified_facility_count"]),
-                "ph": int(row["phantom_count"]),
-                "ts": datetime.now(tz=timezone.utc),
-                "did": district_id,
-                "cap": capability,
-            },
-        )
+    weight = float(existing.burden_weight)
+    denom = float(existing.max_density) or 1.0
+    verified = int((verdicts["verdict"] != "phantom").sum())
+    phantom = int((verdicts["verdict"] == "phantom").sum())
+    raw = max(0.0, min(1.0, (1.0 - verified / denom) * weight))
+    adjusted = max(0.0, min(1.0,
+                            (1.0 - (verified - phantom) / denom) * weight))
+
+    conn.execute(
+        text("""
+            UPDATE operational.desert_scores
+            SET raw_desert_score = :raw,
+                adjusted_desert_score = :adj,
+                verified_facility_count = :ver,
+                phantom_count = :ph,
+                updated_at = :ts
+            WHERE district_id = :did AND capability = :cap
+        """),
+        {
+            "raw": raw,
+            "adj": adjusted,
+            "ver": verified,
+            "ph": phantom,
+            "ts": datetime.now(tz=timezone.utc),
+            "did": district_id,
+            "cap": capability,
+        },
+    )

@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +13,29 @@ from sqlalchemy import Engine, text
 
 from .formula import compute_district_scores
 from .tiles import render_tile_html
+
+# Real NFHS-5 exports use a variety of column names; normalize on read so the
+# rest of the segment can rely on the canonical {district_id, state_name,
+# institutional_delivery_rate} schema.
+_NFHS_COLUMN_ALIASES: dict[str, str] = {
+    "district": "district_id",
+    "District": "district_id",
+    "district_name": "district_id",
+    "state": "state_name",
+    "State": "state_name",
+    "State Name": "state_name",
+    "STATE": "state_name",
+    "Institutional Delivery Rate": "institutional_delivery_rate",
+    "institutional_delivery_rate (%)": "institutional_delivery_rate",
+}
+
+
+def normalize_nfhs_columns(nfhs: pd.DataFrame) -> pd.DataFrame:
+    rename = {raw: canon for raw, canon in _NFHS_COLUMN_ALIASES.items()
+              if raw in nfhs.columns and canon not in nfhs.columns}
+    if rename:
+        nfhs = nfhs.rename(columns=rename)
+    return nfhs
 
 
 def _load_districts(districts_path: Path) -> gpd.GeoDataFrame:
@@ -38,6 +60,7 @@ def run_desert_scoring(
     Returns the count of district rows written.
     """
     ran_at = ran_at or datetime.now(tz=timezone.utc)
+    nfhs = normalize_nfhs_columns(nfhs)
 
     with engine.connect() as conn:
         facilities = pd.DataFrame(conn.execute(text(
@@ -57,7 +80,6 @@ def run_desert_scoring(
         capability=capability,
     )
 
-    # Write scores
     rows = scores.to_dict(orient="records")
     with engine.begin() as conn:
         for r in rows:
@@ -67,10 +89,12 @@ def run_desert_scoring(
                         (district_id, district_name, state_name, capability,
                          raw_desert_score, adjusted_desert_score,
                          verified_facility_count, phantom_count,
-                         burden_imputed, updated_at)
+                         burden_imputed, nfhs_missing,
+                         burden_weight, max_density, updated_at)
                     VALUES
                         (:district_id, :district_name, :state_name, :capability,
-                         :raw, :adj, :ver, :ph, :imp, :ts)
+                         :raw, :adj, :ver, :ph, :imp, :nfhs_missing,
+                         :weight, :max_density, :ts)
                     ON CONFLICT (district_id, capability) DO UPDATE SET
                         district_name = EXCLUDED.district_name,
                         state_name = EXCLUDED.state_name,
@@ -79,6 +103,9 @@ def run_desert_scoring(
                         verified_facility_count = EXCLUDED.verified_facility_count,
                         phantom_count = EXCLUDED.phantom_count,
                         burden_imputed = EXCLUDED.burden_imputed,
+                        nfhs_missing = EXCLUDED.nfhs_missing,
+                        burden_weight = EXCLUDED.burden_weight,
+                        max_density = EXCLUDED.max_density,
                         updated_at = EXCLUDED.updated_at
                 """),
                 {
@@ -91,11 +118,13 @@ def run_desert_scoring(
                     "ver": int(r["verified_facility_count"]),
                     "ph": int(r["phantom_count"]),
                     "imp": bool(r["burden_imputed"]),
+                    "nfhs_missing": bool(r["nfhs_missing"]),
+                    "weight": float(r["burden_weight"]),
+                    "max_density": float(r["max_density"]),
                     "ts": ran_at,
                 },
             )
 
-    # Render tile layers
     districts_gdf = _load_districts(Path(districts_path))
     raw_html = render_tile_html(districts_gdf, scores,
                                 score_col="raw_desert_score",

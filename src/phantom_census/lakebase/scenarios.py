@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
 
 _VERDICT_BY_TYPE = {"force-real": "real", "force-phantom": "phantom"}
 
@@ -59,7 +59,7 @@ def restore_scenario(
     engine: Engine,
     *,
     scenario_id: str,
-    recompute_fn: Callable[[Engine, str, str], None],
+    recompute_fn: Callable[[Connection, str, str], None],
 ) -> list[str]:
     """Re-assert the override set for scenario_id onto phantom_verdicts.
 
@@ -67,6 +67,9 @@ def restore_scenario(
     state is a no-op (LP-SCEN-003). Districts touched by any reassertion are
     passed to ``recompute_fn`` exactly once. Returns the list of district_ids
     actually recomputed.
+
+    ``recompute_fn`` runs on the same ``Connection`` so the score writes
+    participate in the outer transaction.
     """
     with engine.begin() as conn:
         scenario_row = conn.execute(
@@ -118,6 +121,6 @@ def restore_scenario(
                 touched_districts.append(district_row.district_id)
 
         for district_id in touched_districts:
-            recompute_fn(engine, district_id, capability)
+            recompute_fn(conn, district_id, capability)
 
     return touched_districts

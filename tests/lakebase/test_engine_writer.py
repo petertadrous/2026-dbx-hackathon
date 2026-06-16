@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 from datasketch import MinHash
 from sqlalchemy import text
 
@@ -85,23 +86,28 @@ def test_writer_round_trips_signature_jaccard(engine, sample_engine_outputs):
 
 
 # @spec LP-EE-004
-def test_writer_atomic_per_facility(engine, sample_engine_outputs):
-    """If a row in the test set is bad, no partial state remains for that batch."""
+def test_writer_rolls_back_entire_batch_on_inner_failure(engine, sample_engine_outputs):
+    """Trigger a constraint violation INSIDE the transaction (not in
+    pre-validation): set one verdict to a value longer than VARCHAR(16) so the
+    INSERT raises after the tests have already been written within the same
+    transaction. Nothing must remain after rollback."""
     from phantom_census.lakebase.writer import load_engine_outputs
-    # Sabotage: drop the verdict for F1 so the writer cannot complete atomically
-    sample_engine_outputs.phantom_verdicts = sample_engine_outputs.phantom_verdicts.iloc[1:].copy()
-    try:
+    sample_engine_outputs.phantom_verdicts.loc[
+        sample_engine_outputs.phantom_verdicts["facility_id"] == "F2", "verdict"
+    ] = "this-verdict-string-is-far-too-long"  # > VARCHAR(16) -> raises
+    with pytest.raises(Exception):
         load_engine_outputs(sample_engine_outputs, engine,
                             ran_at=datetime(2026, 6, 15, tzinfo=timezone.utc))
-    except Exception:
-        pass
-    # After failure, no rows for F1 should exist anywhere
     with engine.begin() as conn:
         n_tests = conn.execute(text(
-            "SELECT COUNT(*) FROM operational.facility_existence_tests WHERE facility_id='F1'"
+            "SELECT COUNT(*) FROM operational.facility_existence_tests"
         )).scalar_one()
         n_verdicts = conn.execute(text(
-            "SELECT COUNT(*) FROM operational.phantom_verdicts WHERE facility_id='F1'"
+            "SELECT COUNT(*) FROM operational.phantom_verdicts"
+        )).scalar_one()
+        n_sigs = conn.execute(text(
+            "SELECT COUNT(*) FROM cache.claim_minhash"
         )).scalar_one()
     assert n_tests == 0
     assert n_verdicts == 0
+    assert n_sigs == 0

@@ -129,10 +129,13 @@ def maharashtra_districts(engine):
             INSERT INTO operational.desert_scores
             (district_id, district_name, state_name, capability,
              raw_desert_score, adjusted_desert_score,
-             verified_facility_count, phantom_count, burden_imputed, updated_at)
+             verified_facility_count, phantom_count, burden_imputed,
+             nfhs_missing, burden_weight, max_density, updated_at)
             VALUES
-            ('BEED', 'Beed', 'Maharashtra', 'maternity', 0.60, 0.78, 12, 4, FALSE, NOW()),
-            ('MUM',  'Mumbai', 'Maharashtra', 'maternity', 0.30, 0.32, 80, 2, FALSE, NOW())
+            ('BEED', 'Beed', 'Maharashtra', 'maternity', 0.60, 0.78, 12, 4,
+             FALSE, FALSE, 0.3, 80, NOW()),
+            ('MUM',  'Mumbai', 'Maharashtra', 'maternity', 0.30, 0.32, 80, 2,
+             FALSE, FALSE, 0.05, 80, NOW())
         """))
     yield engine
 

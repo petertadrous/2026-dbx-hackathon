@@ -13,18 +13,34 @@ def main() -> None:
     from .session import init_session_state, resolve_planner_id
     from .views import map_view, override_modal, scenario_panel, side_panel
 
+    @st.cache_resource
+    def _engine() -> Engine:
+        # @spec PW (engine reuse) — caching across Streamlit reruns avoids
+        # SQLAlchemy connection-pool churn on every interaction.
+        return get_engine()
+
     st.set_page_config(
         page_title="Phantom Census",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
 
-    planner_id = resolve_planner_id()
-    engine: Engine = get_engine()
+    # @spec PW-OVR-003, PW-SCEN-001 — planner identity in production comes from
+    # the Apps-injected `X-Forwarded-Email` header (st.context.headers); the env
+    # var and local-dev paths are fallbacks.
+    try:
+        headers = dict(st.context.headers) if hasattr(st, "context") else {}
+    except Exception:
+        headers = {}
+    planner_id = resolve_planner_id(headers)
+
+    engine = _engine()
     workspace = init_session_state(st.session_state, planner_id)
 
-    if workspace.last_error:
-        st.error(workspace.last_error)
+    last_error = workspace.last_error
+    workspace.last_error = None  # display once; siblings re-set if they fail
+    if last_error:
+        st.error(last_error)
 
     map_col, panel_col = st.columns([0.6, 0.4])
     with map_col:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .engine import get_engine
 from .migrate import init_schema
-from .overrides import apply_override, save_override
+from .overrides import apply_override, save_override, submit_override
 from .readers import (
     get_desert_scores,
     get_district_phantoms,
@@ -19,6 +19,6 @@ __all__ = [
     "load_engine_outputs", "WriteStats",
     "get_desert_scores", "get_district_phantoms", "get_facility_tests",
     "get_tile_html", "get_saved_scenarios",
-    "save_override", "apply_override",
+    "save_override", "apply_override", "submit_override",
     "save_scenario", "restore_scenario",
 ]
