@@ -61,8 +61,31 @@ def _empty(columns: list[str]) -> pd.DataFrame:
 
 
 # @spec EE-PIPE-001, EE-PIPE-002, EE-PIPE-003, EE-HASH-001
-def run_engine(inputs: EngineInputs, ran_at: datetime | None = None) -> EngineOutputs:
+def run_engine(
+    inputs: EngineInputs,
+    ran_at: datetime | None = None,
+    *,
+    progress: bool = False,
+) -> EngineOutputs:
+    """Run the full engine.
+
+    Set `progress=True` to print phase milestones to stdout (`[Tests 1] …`).
+    The Databricks notebook UI streams stdout, so this gives live progress
+    without requiring tqdm.
+    """
     ran_at = ran_at or datetime.now(tz=timezone.utc)
+
+    import time
+    def _phase(name: str):
+        t0 = time.time()
+        if progress:
+            print(f"[engine] {name}: start", flush=True)
+        return name, t0
+
+    def _done(p):
+        if progress:
+            name, t0 = p
+            print(f"[engine] {name}: done in {time.time() - t0:.1f}s", flush=True)
 
     district_to_state = inputs.district_to_state
     if not district_to_state:
@@ -70,36 +93,59 @@ def run_engine(inputs: EngineInputs, ran_at: datetime | None = None) -> EngineOu
 
     current_year = inputs.current_year or ran_at.year
 
+    p = _phase("Spatial join (R-tree)")
     pin_centroids = pin_lookup.build_pin_centroids(inputs.india_post)
     facilities_with_district = spatial.assign_districts(inputs.facilities, inputs.districts)
+    _done(p)
 
     signatures: dict[str, MinHash] = {}
 
-    # Tests 1–5
+    p = _phase("Test 1: PIN reverse-lookup")
     t1 = pin_lookup.run_pin_test(inputs.facilities, pin_centroids)
-    t2 = run_minhash_test(inputs.facilities, signatures_out=signatures)
-    t3 = spatial.run_spatial_test(inputs.facilities, inputs.districts, inputs.india_post)
-    t4 = nfhs.run_nfhs_test(facilities_with_district, inputs.nfhs, district_to_state)
-    t5 = temporal.run_temporal_test(inputs.facilities, current_year)
+    _done(p)
 
-    # Test 6 — embedding drift (EE-EMBED-001..007).
+    p = _phase("Test 2: MinHash near-duplicate (LSH)")
+    t2 = run_minhash_test(inputs.facilities, signatures_out=signatures)
+    _done(p)
+
+    p = _phase("Test 3: spatial district mismatch")
+    # Reuse the already-computed spatial join — skip the double join.
+    t3 = spatial.run_spatial_test(
+        inputs.facilities, inputs.districts, inputs.india_post,
+        assigned=facilities_with_district,
+    )
+    _done(p)
+
+    p = _phase("Test 4: NFHS bottom-quartile")
+    t4 = nfhs.run_nfhs_test(facilities_with_district, inputs.nfhs, district_to_state)
+    _done(p)
+
+    p = _phase("Test 5: temporal implausibility")
+    t5 = temporal.run_temporal_test(inputs.facilities, current_year)
+    _done(p)
+
+    p = _phase("Test 6: embedding drift")
     current_embeddings = _build_current_embeddings(inputs.facilities)
     prior = inputs.prior_embeddings or {}
     t6 = embedding_drift.run_embedding_test(inputs.facilities, current_embeddings, prior)
+    _done(p)
 
     facility_tests = pd.concat([t1, t2, t3, t4, t5, t6], ignore_index=True)
     facility_tests["ran_at"] = ran_at
 
     # Layer B — dataset-version reconciliation, pre-Adjudicator.
+    p = _phase("Layer B: dataset-version reconciliation")
     reconciliation = inputs.reconciliation_table
     if reconciliation is None:
         reconciliation = _empty(["pin_district", "spatial_district", "reason"])
     facility_tests = layer_b.run_layer_b(facility_tests, inputs.facilities, reconciliation)
-    # Make sure any new override rows carry `ran_at` for the EE-ADJ-002 latest-by-ran_at rule.
     facility_tests["ran_at"] = facility_tests["ran_at"].fillna(ran_at)
+    _done(p)
 
     # Deterministic Adjudicator — six tests + Layer B overrides.
+    p = _phase("Adjudicator")
     verdicts = run_adjudicator(facility_tests)
+    _done(p)
 
     # Layer A inputs: facilities frame must carry `facility_name` and `district`.
     facilities_with_name = inputs.facilities.copy()
@@ -115,15 +161,19 @@ def run_engine(inputs: EngineInputs, ran_at: datetime | None = None) -> EngineOu
         else _empty(["district", "staff_name"])
 
     # Layer A — structured-field corroboration, post-Adjudicator.
+    p = _phase("Layer A: structured-field corroboration")
     verdicts = layer_a.run_layer_a(verdicts, facilities_with_name, inputs.hfr, nfhs_staff_df)
+    _done(p)
 
     # Layer C — FMA corroboration synthesis (activation-gated to contested).
     # The pipeline injects a deterministic template-fallback ai_query by default
     # so batch runs do not hit the FMA; callers may swap in a real adapter.
+    p = _phase("Layer C: FMA corroboration synthesis (gated)")
     verdicts = layer_c.run_layer_c(
         verdicts, facilities_with_name, _empty(["facility_id", "matched", "reason"]),
         ai_query=_default_layer_c_ai_query,
     )
+    _done(p)
 
     verdicts["ran_at"] = ran_at
     # EE-AI cache columns initialized null at batch time; populated lazily at

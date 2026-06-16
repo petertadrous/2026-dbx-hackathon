@@ -119,7 +119,9 @@ inputs = EngineInputs(
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    outputs = run_engine(inputs, ran_at=ran_at)
+    # progress=True prints phase milestones to stdout — Databricks notebook
+    # UI streams them live so you can watch where the engine currently is.
+    outputs = run_engine(inputs, ran_at=ran_at, progress=True)
 
 print(f"facility_existence_tests: {len(outputs.facility_existence_tests):,} rows")
 print(f"phantom_verdicts:         {len(outputs.phantom_verdicts):,} rows")
@@ -317,20 +319,69 @@ def write_gold(df: pd.DataFrame, table: str) -> None:
     if df.empty:
         print(f"  ✗ {fqn}: empty — skipped")
         return
-    # Convert via Arrow to avoid Spark-Pandas dtype edge cases on JSONB/bytes.
     sdf = spark.createDataFrame(df)
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(fqn)
     print(f"  ✓ {fqn}: {sdf.count():,} rows")
 
 
+# Batch-owned columns per LP-EE-002. The MERGE updates ONLY these columns,
+# preserving the app-mutable columns (`ai_recommendation`,
+# `ai_recommendation_evidence_state`, `override_id`) across re-runs so a
+# planner's accumulated overrides + AI cache writes survive a refresh.
+_BATCH_OWNED_VERDICT_COLS = (
+    "adjudicator_verdict", "verdict", "reason", "rescue_applied",
+    "test_outcome_vector", "layer_c_synthesis", "ran_at",
+)
+
+
+def write_gold_phantom_verdicts_merge(df: pd.DataFrame) -> None:
+    """Idempotent write for phantom_verdicts that mirrors writer.py's LP-EE-002
+    preservation contract.
+
+    First run (target table doesn't exist): plain CREATE-from-staging.
+    Re-runs: MERGE staging INTO target on facility_id, updating only the
+    batch-owned columns. `ai_recommendation`, `ai_recommendation_evidence_state`,
+    and `override_id` are NEVER touched here — they're owned by the app's
+    LP-AI-CACHE and LP-OVR write paths.
+    """
+    fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.phantom_verdicts"
+    staging = f"{fqn}_staging"
+    if df.empty:
+        print(f"  ✗ {fqn}: empty — skipped")
+        return
+
+    sdf = spark.createDataFrame(df)
+    sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(staging)
+
+    if not spark.catalog.tableExists(fqn):
+        spark.sql(f"CREATE TABLE {fqn} AS SELECT * FROM {staging}")
+        spark.sql(f"DROP TABLE {staging}")
+        print(f"  ✓ {fqn}: {sdf.count():,} rows (initial CREATE)")
+        return
+
+    set_clauses = ",\n              ".join(
+        f"target.{c} = source.{c}" for c in _BATCH_OWNED_VERDICT_COLS
+    )
+    spark.sql(f"""
+        MERGE INTO {fqn} AS target
+        USING {staging} AS source
+        ON target.facility_id = source.facility_id
+        WHEN MATCHED THEN UPDATE SET
+              {set_clauses}
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+    spark.sql(f"DROP TABLE {staging}")
+    print(f"  ✓ {fqn}: {sdf.count():,} rows (MERGE — app cache + override_id preserved)")
+
+
 print("Writing gold tables...")
-write_gold(facilities_slim,           "facilities")
-write_gold(verdicts_gold,             "phantom_verdicts")
-write_gold(tests_gold,                "facility_existence_tests")
-write_gold(desert_scores_gold,        "desert_scores")
-write_gold(embeddings_gold,           "description_embeddings")
-write_gold(capabilities_gold,         "facility_capabilities")
-write_gold(budget_allocations_gold,   "budget_allocations")
+write_gold(facilities_slim,                  "facilities")
+write_gold_phantom_verdicts_merge(verdicts_gold)
+write_gold(tests_gold,                       "facility_existence_tests")
+write_gold(desert_scores_gold,               "desert_scores")
+write_gold(embeddings_gold,                  "description_embeddings")
+write_gold(capabilities_gold,                "facility_capabilities")
+write_gold(budget_allocations_gold,          "budget_allocations")
 
 print("\nAll gold tables written. Next: docs/setup-synced-tables.sh creates "
       "synced tables in Lakebase + grants the app SP SELECT.")

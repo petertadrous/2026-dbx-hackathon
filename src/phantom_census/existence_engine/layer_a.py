@@ -186,7 +186,16 @@ def run_layer_a(
         out["rescue_applied"] = None
     fac_by_id = facilities.set_index("facility_id")
 
-    for idx, row in out.iterrows():
+    # tqdm.auto detects notebooks and emits a widget; in CI / scripts it
+    # falls back to a stderr bar. Skip cleanly if the package isn't present.
+    try:
+        from tqdm.auto import tqdm
+        iterator = tqdm(out.iterrows(), total=len(out), desc="Layer A",
+                        leave=False)
+    except ImportError:
+        iterator = out.iterrows()
+
+    for idx, row in iterator:
         # EE-LAYER-A-001 — evaluate only facilities marked `phantom` by the
         # Adjudicator. `real` and `contested` are out of scope.
         if row["adjudicator_verdict"] != Verdict.PHANTOM.value:
