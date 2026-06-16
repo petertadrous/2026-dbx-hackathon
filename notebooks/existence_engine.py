@@ -57,6 +57,14 @@ facilities = facilities_raw.rename(columns={
     "name": "facility_name",
     "address_zipOrPostcode": "pincode",
 })
+# The VF bronze table has duplicate facility_id rows; the engine pipeline
+# assumes one row per facility_id (Layer A uses `fac_by_id.loc[fac_id]`
+# which silently returns a DataFrame on duplicate keys and breaks scalar
+# checks). Dedupe at ingest, keeping the first occurrence.
+before_dedup = len(facilities)
+facilities = facilities.drop_duplicates(subset=["facility_id"]).reset_index(drop=True)
+print(f"facilities after dedup on facility_id: {len(facilities):,} "
+      f"({before_dedup - len(facilities):,} duplicates dropped)")
 
 india_post = india_post_raw.rename(columns={"statename": "state"})
 india_post["pincode"] = india_post["pincode"].astype(str).str.strip()

@@ -58,6 +58,11 @@ def _name_tokens(name: str) -> set[str]:
 # @spec EE-LAYER-A-002
 def _url_mentions_signal(facility: pd.Series) -> dict | None:
     desc = facility.get("description")
+    # Defensive: when upstream passes a frame with duplicate facility_id rows,
+    # `.loc[fac_id]` returns a DataFrame and `desc` is a Series — `not desc`
+    # would raise. Coerce to scalar so the absent/empty check works either way.
+    if isinstance(desc, pd.Series):
+        desc = desc.dropna().astype(str).iloc[0] if not desc.dropna().empty else None
     if not desc:
         return None
     facility_tokens = _name_tokens(_norm(facility.get("facility_name")))
