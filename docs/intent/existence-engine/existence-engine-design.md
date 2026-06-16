@@ -90,13 +90,10 @@ verdict = real      IF count(FAIL) == 0
 
 The Defender runs after the Prosecutor produces its initial verdict set. For facilities initially marked `phantom`, the Defender looks for corroborating evidence that rescues them:
 
-- Multiple distinct source URLs in the description pointing to verifiable external references
 - Matching entry in the Health Facility Registry (HFR) pre-cached snapshot — this is the sixth existence test (add-on per differentiation strategy)
-- Named staff or doctor listed in both the description and NFHS district denominator data
+- Multiple distinct registrable domains (eTLD+1) referenced in the description, indicating multiple independent external sources
 
-A Defender rescue upgrades a `phantom` verdict to `contested`.
-
-The Defender also owns the **dataset-version reconciliation layer**: a PIN-vs-spatial disagreement caused by post-2022 district reorganization (Bapatla carved from Prakasam, NTR from Krishna) or spelling drift (Mysore↔Mysuru, Ahmadnagar↔Ahmednagar) must be rescued, not flagged. Day-0 validation showed ~9pp of the raw 24.5% PIN-vs-spatial disagreement falls into this bucket — these are data-currency mismatches, not phantom signals.
+Both signals are evaluated for every `phantom`-verdicted facility; when either fires, the verdict is upgraded to `contested` and the evidence record captures every signal that fired (not only the first). A Defender rescue upgrades a `phantom` verdict to `contested`.
 
 It cannot upgrade to `real` — only `real` when all Prosecutor tests pass.
 
@@ -115,7 +112,7 @@ Bronze (raw ingestion) → Silver (existence tests + verdicts) → Lakebase (ope
 **Lakebase operational tables:**
 - `operational.phantom_verdicts` — the CDC source for map redraw; mutable (Defender can update)
 - `operational.facility_existence_tests` — detail view for the side panel
-- `cache.description_minhash` — MinHash signatures stored as BYTEA; computed once
+- `cache.claim_minhash` — MinHash signatures stored as BYTEA; computed once. Named for the claim-array text the signature represents (capability + procedure + equipment), not the `description` field — see EE-HASH-001 and the Day-0 validation rationale.
 
 ## Decisions & Alternatives
 
@@ -137,6 +134,7 @@ Bronze (raw ingestion) → Silver (existence tests + verdicts) → Lakebase (ope
 ### Deferred
 1. Whether to expose Jaccard threshold as a planner-configurable slider in the UI — deferred to post-MVP if Day-0 validation reveals threshold sensitivity.
 2. Whether NFHS-5 Test 4 should also apply to ICU/trauma capability claims using an NCD indicator — deferred pending Tier 3 validation results.
+3. **Dataset-version reconciliation in the Defender.** A PIN-vs-spatial disagreement caused by post-2022 district carve-outs (Bapatla from Prakasam, NTR from Krishna) or true spelling drift (Mysore↔Mysuru, Ahmadnagar↔Ahmednagar) should ultimately be rescued by the Defender rather than flagged as a phantom. Day-0 validation showed ~9pp of the raw 24.5% disagreement falls into this bucket. Deferred for the hackathon; case- and punctuation-level normalization in Test 4 (NFHS join) is in scope; rename and carve-out maps are out of scope.
 
 ## References
 

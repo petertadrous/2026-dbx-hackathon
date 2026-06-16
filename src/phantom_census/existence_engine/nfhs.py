@@ -9,6 +9,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from .spatial import normalize_district_name
 from .types import TestName, TestResult
 
 MATERNITY_TERMS = (
@@ -67,11 +68,16 @@ def run_nfhs_test(
     nfhs_lookup["rate"] = pd.to_numeric(
         nfhs_lookup["institutional_delivery_rate"], errors="coerce"
     )
+    # Normalize district keys to absorb spelling drift between datasets
+    # (e.g. "Mysore"/"Mysuru", "Maharastra"/"Maharashtra").
     rate_by_district: dict[str, float | None] = {
-        row["district"]: (
+        normalize_district_name(row["district"]): (
             None if pd.isna(row["rate"]) else float(row["rate"])
         )
         for _, row in nfhs_lookup.iterrows()
+    }
+    norm_district_to_state = {
+        normalize_district_name(k): v for k, v in district_to_state.items()
     }
 
     rows: list[dict] = []
@@ -82,16 +88,20 @@ def run_nfhs_test(
             continue
 
         sp_district = fac.get("spatial_district")
-        if sp_district is None or sp_district not in rate_by_district:
+        if sp_district is None:
+            rows.append(_row(fac_id, TestResult.INDETERMINATE, None))
+            continue
+        norm_district = normalize_district_name(sp_district)
+        if norm_district not in rate_by_district:
             rows.append(_row(fac_id, TestResult.INDETERMINATE, None))
             continue
 
-        rate = rate_by_district[sp_district]
+        rate = rate_by_district[norm_district]
         if rate is None:
             rows.append(_row(fac_id, TestResult.INDETERMINATE, None))
             continue
 
-        state = district_to_state.get(sp_district)
+        state = norm_district_to_state.get(norm_district)
         if state is None or state not in cutoffs:
             rows.append(_row(fac_id, TestResult.INDETERMINATE, None))
             continue

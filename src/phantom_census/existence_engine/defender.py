@@ -94,25 +94,27 @@ def run_defender(
             continue
         fac = fac_by_id.loc[fac_id]
 
-        rescue_evidence: dict | None = None
+        signals: list[dict] = []
 
         hfr = hfr_match(fac, hfr_df)
         if hfr is not None:
-            rescue_evidence = {"signal": "hfr-match", "match": hfr}
-        elif distinct_registrable_domains(fac.get("description")) >= MIN_DISTINCT_DOMAINS:
-            rescue_evidence = {
-                "signal": "multi-domain-urls",
-                "domain_count": distinct_registrable_domains(fac.get("description")),
-            }
+            signals.append({"signal": "hfr-match", "match": hfr})
 
-        if rescue_evidence is not None:
+        domain_count = distinct_registrable_domains(fac.get("description"))
+        if domain_count >= MIN_DISTINCT_DOMAINS:
+            signals.append({
+                "signal": "multi-domain-urls",
+                "domain_count": domain_count,
+            })
+
+        if signals:
             updated.at[idx, "verdict"] = Verdict.CONTESTED.value
             updated.at[idx, "reason"] = "defender-rescue"
             rescue_rows.append({
                 "facility_id": fac_id,
                 "test_name": TestName.DEFENDER_RESCUE.value,
                 "result": "pass",
-                "evidence_ref": rescue_evidence,
+                "evidence_ref": {"signals": signals},
             })
 
     rescue_df = pd.DataFrame(rescue_rows, columns=[

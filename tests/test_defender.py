@@ -127,6 +127,30 @@ def test_defender_cannot_upgrade_to_real(hfr_minimal):
     assert upd.iloc[0]["verdict"] != Verdict.REAL.value
 
 
+# @spec EE-DEF-002, EE-DEF-003
+def test_defender_combines_both_rescue_signals_in_evidence(hfr_minimal):
+    """When HFR match + multi-domain URLs both fire, evidence captures both."""
+    verdicts = pd.DataFrame(
+        [
+            {"facility_id": "BOTH", "verdict": Verdict.PHANTOM.value,
+             "reason": None, "test_outcome_vector": []}
+        ]
+    )
+    facilities = pd.DataFrame(
+        [
+            {"facility_id": "BOTH",
+             "facility_name": "Municipal General Hospital",
+             "district": "Mumbai",
+             "description": "https://apollohospitals.com https://medanta.org"},
+        ]
+    )
+    _, rescue = defender.run_defender(verdicts, facilities, hfr_minimal)
+    assert len(rescue) == 1
+    signals = rescue.iloc[0]["evidence_ref"]["signals"]
+    kinds = {s["signal"] for s in signals}
+    assert kinds == {"hfr-match", "multi-domain-urls"}
+
+
 # @spec EE-DEF-005
 def test_defender_rescue_emits_one_test_row_per_upgrade(hfr_minimal):
     verdicts = pd.DataFrame(

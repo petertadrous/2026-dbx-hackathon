@@ -77,6 +77,25 @@ def test_pipeline_verdict_table_columns(facilities_minimal, india_post_minimal,
     assert out.phantom_verdicts.iloc[0]["verdict"] in {v.value for v in Verdict}
 
 
+# @spec EE-PIPE-001, EE-NFHS-003
+def test_pipeline_auto_builds_district_to_state_when_omitted(
+    facilities_minimal, india_post_minimal, nfhs_minimal, districts_minimal,
+    hfr_minimal,
+):
+    """When EngineInputs.district_to_state is None, pipeline derives it from
+    India Post + NFHS so the caller is not forced to pre-compute the lookup."""
+    out = run_engine(EngineInputs(
+        facilities=facilities_minimal,
+        india_post=india_post_minimal,
+        nfhs=nfhs_minimal,
+        districts=districts_minimal,
+        hfr=hfr_minimal,
+        district_to_state=None,
+        current_year=None,
+    ))
+    assert len(out.phantom_verdicts) == len(facilities_minimal)
+
+
 # @spec EE-PIPE-004
 def test_pipeline_uses_indeterminate_on_absent_data(india_post_minimal, nfhs_minimal,
                                                      districts_minimal, hfr_minimal,

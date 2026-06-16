@@ -4,6 +4,9 @@ Implements EE-HASH-001..005.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 from datasketch import MinHash
 
@@ -86,8 +89,26 @@ def cluster_by_jaccard(signatures: dict[str, MinHash]) -> dict[str, list[str]]:
     return {fid: clusters[find(fid)] for fid in ids}
 
 
+# @spec EE-HASH-001
+def serialize_signature(sig: MinHash) -> bytes:
+    """Serialize a MinHash signature to BYTEA-compatible bytes (uint32 hash values).
+
+    A 128-perm signature is 512 bytes (128 × 4-byte uint32).
+    """
+    return np.asarray(sig.hashvalues, dtype=np.uint32).tobytes()
+
+
 # @spec EE-HASH-001, EE-HASH-002, EE-HASH-003, EE-HASH-004, EE-HASH-005
-def run_minhash_test(facilities: pd.DataFrame) -> pd.DataFrame:
+def run_minhash_test(
+    facilities: pd.DataFrame,
+    signatures_out: dict[str, MinHash] | None = None,
+) -> pd.DataFrame:
+    """Run Test 2; optionally capture computed signatures into `signatures_out`.
+
+    Callers wanting to persist EE-HASH-001's BYTEA cache pass a dict; it is
+    filled with {facility_id: MinHash}. Use `serialize_signature()` to get
+    BYTEA bytes per facility.
+    """
     signatures: dict[str, MinHash] = {}
     indeterminate: list[str] = []
 
@@ -99,6 +120,9 @@ def run_minhash_test(facilities: pd.DataFrame) -> pd.DataFrame:
             indeterminate.append(fac_id)
         else:
             signatures[fac_id] = sig
+
+    if signatures_out is not None:
+        signatures_out.update(signatures)
 
     cluster_map = cluster_by_jaccard(signatures) if signatures else {}
 
@@ -116,12 +140,28 @@ def run_minhash_test(facilities: pd.DataFrame) -> pd.DataFrame:
             rows.append(_row(fac_id, TestResult.PASS, None))
 
     out = pd.DataFrame(rows)
-    # Preserve facility order for deterministic output
     if not out.empty:
         order = list(facilities["facility_id"])
         out["__sort"] = out["facility_id"].map({fid: i for i, fid in enumerate(order)})
         out = out.sort_values("__sort").drop(columns="__sort").reset_index(drop=True)
     return out
+
+
+# @spec EE-HASH-001
+def persist_signatures(signatures: dict[str, MinHash], out_path: Path) -> None:
+    """Write {facility_id, signature_bytea} to a Parquet cache.
+
+    Lakebase load (cache.claim_minhash, naming aligned with lakebase-persistence
+    LLD) is owned by the sibling segment; this writes the local cache file the
+    Lakebase loader reads.
+    """
+    rows = [
+        {"facility_id": fid, "signature_bytea": serialize_signature(sig)}
+        for fid, sig in signatures.items()
+    ]
+    df = pd.DataFrame(rows, columns=["facility_id", "signature_bytea"])
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out_path)
 
 
 def _row(fac_id: str, result: TestResult, evidence_ref: dict | None) -> dict:
