@@ -1,0 +1,96 @@
+name: Deploy phantom-census-app
+
+# CI/CD pipeline for the Databricks App in phantom-census-app/.
+#   - Pull requests: build / typecheck / lint + bundle validate (no deploy).
+#   - Push to main:  deploy + start the app on the prod target.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   DATABRICKS_HOST           https://dbc-19a082ca-056e.cloud.databricks.com
+#   DATABRICKS_CLIENT_ID      OAuth (M2M) service-principal client id
+#   DATABRICKS_CLIENT_SECRET  OAuth (M2M) service-principal secret
+# The service principal must have CAN_MANAGE on the app and access to the
+# Lakebase Postgres project referenced in databricks.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "phantom-census-app/**"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "phantom-census-app/**"
+      - ".github/workflows/deploy.yml"
+
+# Never run two deploys against the same target at once.
+concurrency:
+  group: deploy-phantom-census-app-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: phantom-census-app
+
+jobs:
+  validate:
+    name: Build & validate
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: phantom-census-app/package-lock.json
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - uses: databricks/setup-cli@main
+
+      # Confirms the bundle resolves against the workspace before any deploy.
+      - name: Validate bundle (prod)
+        if: ${{ env.DATABRICKS_CLIENT_ID != '' }}
+        run: databricks bundle validate --target prod --strict
+
+  deploy:
+    name: Deploy (prod)
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: phantom-census-app/package-lock.json
+
+      - run: npm ci
+
+      - uses: databricks/setup-cli@main
+
+      # Enhanced AppKit flow: validate (build/typecheck/lint) -> deploy -> run.
+      # --force overrides the git-branch guard for CI checkouts;
+      # --auto-approve skips interactive prompts.
+      - name: Deploy and start app
+        run: databricks apps deploy --target prod --auto-approve --force

@@ -2,6 +2,9 @@ bundle:
   name: phantom-census-app
 
 variables:
+  app_name:
+    description: Databricks App resource name. App names are workspace-global, so dev and prod use distinct names.
+    default: phantom-census-app
   postgres_branch:
     description: Full Lakebase Postgres branch resource name. Obtain by running `databricks postgres list-branches {project-name}`, select the desired item from the output array and use its .name value. Requires the project resource name.
   postgres_database:
@@ -12,7 +15,7 @@ variables:
 resources:
   apps:
     app:
-      name: "phantom-census-app"
+      name: ${var.app_name}
       description: "Phantom Census hackathon app backed by Lakebase synced facilities data"
       source_code_path: ./
       # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
@@ -28,12 +31,29 @@ resources:
             permission: CAN_CONNECT_AND_CREATE
 
 targets:
-  default:
+  # Personal/iteration target. `mode: development` deploys under your user
+  # workspace path and pauses any schedules. Default when no -t flag is given.
+  dev:
+    mode: development
     default: true
     workspace:
-      host: https://dbc-fde42400-6dda.cloud.databricks.com
-
+      host: https://dbc-19a082ca-056e.cloud.databricks.com
     variables:
+      app_name: phantom-census-app-dev
+      postgres_branch: projects/phantom-census/branches/production
+      postgres_database: projects/phantom-census/branches/production/databases/databricks-postgres
+      postgres_project: projects/phantom-census
+
+  # Shared deployment target used by the GitHub Actions pipeline.
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-19a082ca-056e.cloud.databricks.com
+      # Pin a single deploy location so CI (service principal) and humans
+      # converge on one copy instead of one per deploying identity.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: phantom-census-app
       postgres_branch: projects/phantom-census/branches/production
       postgres_database: projects/phantom-census/branches/production/databases/databricks-postgres
       postgres_project: projects/phantom-census
