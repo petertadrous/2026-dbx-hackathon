@@ -90,7 +90,7 @@ def test_recompute_is_fast(
 def test_rank_table_reflects_recomputed_score(
     small_facilities_with_district, small_verdicts, small_nfhs
 ):
-    from phantom_census.desert_scoring.ranking import build_rank_table
+    from phantom_census.desert_scoring.tiles import build_rank_table
     scores = compute_district_scores(
         facilities_with_district=small_facilities_with_district,
         verdicts=small_verdicts,
@@ -112,36 +112,3 @@ def test_rank_table_reflects_recomputed_score(
     # Beed's adjusted score should now match its raw (since phantom_count=0)
     beed_rank = rank[rank["district_id"] == "BEED"].iloc[0]
     assert beed_rank["adjusted_desert_score"] == beed_rank["raw_desert_score"]
-
-
-# @spec DS-OVR-005
-def test_recompute_preserves_burden_imputed(
-    small_facilities_with_district, small_verdicts, small_nfhs,
-):
-    """An override does not flip burden_imputed; NFHS-5 imputation is a per-
-    district data property, not a count-driven one."""
-    scores = compute_district_scores(
-        facilities_with_district=small_facilities_with_district,
-        verdicts=small_verdicts,
-        nfhs=small_nfhs,
-        capability="maternity",
-    )
-    # PUN's NFHS is `*`-suppressed → burden_imputed=True for that row.
-    pun_before = scores[scores["district_id"] == "PUN"].iloc[0]
-    assert pun_before["burden_imputed"] is True or pun_before["burden_imputed"] == 1
-
-    # Flip F5 from real to phantom (it's in PUN).
-    updated = small_verdicts.copy()
-    updated.loc[updated["facility_id"] == "F5", "verdict"] = "phantom"
-
-    new_scores = recompute_in_memory(
-        previous_scores=scores,
-        facilities_with_district=small_facilities_with_district,
-        verdicts=updated,
-        nfhs=small_nfhs,
-        capability="maternity",
-        district_id="PUN",
-        max_density=float(scores["max_density"].iloc[0]),
-    )
-    pun_after = new_scores[new_scores["district_id"] == "PUN"].iloc[0]
-    assert bool(pun_after["burden_imputed"]) is True

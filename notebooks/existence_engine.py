@@ -1,13 +1,14 @@
 # Databricks notebook source
-# Run on DBR 15.4 LTS ML (includes geopandas system libs).
-# Reads bronze UC tables → runs the 6-test existence engine → writes gold Delta tables.
-# Gold tables are then mirrored to Lakebase as synced tables via
-# `databricks postgres create-synced-table` per LP-SYNC-001..LP-SYNC-006.
+# Runs on Databricks serverless compute (Free Edition).
+# Reads bronze UC tables → runs the 5-signal existence engine → writes gold Delta tables
+# and pushes all results directly to Lakebase Postgres via psycopg2.
 
 # COMMAND ----------
 
 # MAGIC %pip install --quiet \
-# MAGIC   "git+https://github.com/petertadrous/2026-dbx-hackathon.git@updated-specs" \
+# MAGIC   "git+https://github.com/petertadrous/2026-dbx-hackathon.git" \
+# MAGIC   "databricks-sdk>=0.81.0" \
+# MAGIC   folium==0.18.0 \
 # MAGIC   requests
 
 # COMMAND ----------
@@ -17,15 +18,19 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import json
+import math
 import re
 import tempfile
+import traceback
 import warnings
 from datetime import datetime, timezone
 
+import folium
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import requests
+from pyspark.sql import functions as F
 
 from phantom_census.existence_engine.data_loading import (
     build_district_to_state,
@@ -34,6 +39,7 @@ from phantom_census.existence_engine.data_loading import (
 )
 from phantom_census.existence_engine.pipeline import EngineInputs, run_engine
 from phantom_census.existence_engine.spatial import assign_districts
+from phantom_census.desert_scoring.tiles import CAPABILITIES, validate_tile_layers
 
 # COMMAND ----------
 # ── 1. Read bronze UC tables ──────────────────────────────────────────────────
@@ -52,25 +58,29 @@ print(f"nfhs:       {len(nfhs_raw):,} rows")
 # COMMAND ----------
 # ── 2. Normalise column names to match engine contracts ───────────────────────
 
-facilities = facilities_raw.rename(columns={
-    "unique_id": "facility_id",
-    "name": "facility_name",
-    "address_zipOrPostcode": "pincode",
-})
-# The VF bronze table has duplicate facility_id rows; the engine pipeline
-# assumes one row per facility_id (Layer A uses `fac_by_id.loc[fac_id]`
-# which silently returns a DataFrame on duplicate keys and breaks scalar
-# checks). Dedupe at ingest, keeping the first occurrence.
-before_dedup = len(facilities)
-facilities = facilities.drop_duplicates(subset=["facility_id"]).reset_index(drop=True)
-print(f"facilities after dedup on facility_id: {len(facilities):,} "
-      f"({before_dedup - len(facilities):,} duplicates dropped)")
+# facilities: unique_id → facility_id, name → facility_name, address_zipOrPostcode → pincode
+# unique_id is not guaranteed unique in the VF dataset — deduplicate before
+# the engine so every signal test emits exactly one row per facility_id.
+facilities = (
+    facilities_raw
+    .rename(columns={
+        "unique_id": "facility_id",
+        "name": "facility_name",
+        "address_zipOrPostcode": "pincode",
+    })
+    .drop_duplicates(subset=["facility_id"])
+    .reset_index(drop=True)
+)
 
+# india_post: statename → state (load_india_post handles this but we're bypassing
+# the file loader here, so do it manually); cast lat/lon to float
 india_post = india_post_raw.rename(columns={"statename": "state"})
 india_post["pincode"] = india_post["pincode"].astype(str).str.strip()
 india_post["latitude"] = pd.to_numeric(india_post["latitude"], errors="coerce")
 india_post["longitude"] = pd.to_numeric(india_post["longitude"], errors="coerce")
 
+# nfhs: district_name → district, state_ut → state,
+# institutional_birth_5y_pct → institutional_delivery_rate
 nfhs = nfhs_raw.rename(columns={
     "district_name": "district",
     "state_ut": "state",
@@ -84,7 +94,7 @@ nfhs["institutional_delivery_rate"] = pd.to_numeric(
 print("Column normalisation complete")
 
 # COMMAND ----------
-# ── 3. Download geoBoundaries India ADM2 polygons (preserve shapeID) ──────────
+# ── 3. Download geoBoundaries India ADM2 district polygons ────────────────────
 
 GEO_URL = (
     "https://github.com/wmgeolab/geoBoundaries/raw/main/"
@@ -98,13 +108,12 @@ with tempfile.NamedTemporaryFile(suffix=".geojson", delete=False) as f:
     f.write(resp.content)
 
 districts = load_districts(geo_path)
-print(f"Districts loaded: {len(districts)} polygons; has shapeID: {'shapeID' in districts.columns}")
+print(f"Districts loaded: {len(districts)} polygons")
 
 # COMMAND ----------
-# ── 4. Run the existence engine (6 tests + Layer B + Adjudicator + Layer A + Layer C) ──
+# ── 4. Run the existence engine ───────────────────────────────────────────────
 
 ran_at = datetime.now(tz=timezone.utc)
-snapshot_id = ran_at.strftime("%Y-%m-%d-batch-001")
 
 inputs = EngineInputs(
     facilities=facilities,
@@ -114,199 +123,344 @@ inputs = EngineInputs(
     hfr=load_hfr(None),       # no HFR snapshot for demo
     district_to_state=None,    # engine will build from india_post + nfhs
     current_year=ran_at.year,
-    snapshot_id=snapshot_id,
 )
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    # progress=True prints phase milestones to stdout — Databricks notebook
-    # UI streams them live so you can watch where the engine currently is.
-    outputs = run_engine(inputs, ran_at=ran_at, progress=True)
+    outputs = run_engine(inputs, ran_at=ran_at)
 
 print(f"facility_existence_tests: {len(outputs.facility_existence_tests):,} rows")
 print(f"phantom_verdicts:         {len(outputs.phantom_verdicts):,} rows")
-print(f"description_embeddings:   {len(outputs.description_embeddings):,} rows")
-print(f"facility_capabilities:    {len(outputs.facility_capabilities):,} rows")
 
 verdict_counts = outputs.phantom_verdicts["verdict"].value_counts()
-print(f"\nverdict mix:")
-for k, v in verdict_counts.items():
-    print(f"  {k}: {v:,}")
+print(f"  phantom:   {verdict_counts.get('phantom', 0):,}")
+print(f"  contested: {verdict_counts.get('contested', 0):,}")
+print(f"  real:      {verdict_counts.get('real', 0):,}")
 
 # COMMAND ----------
-# ── 5. Build facility metadata sidecar (district + state lookup) ──────────────
+# ── 5. Enrich phantom_verdicts with facility metadata and district info ────────
 
 facilities_with_district = assign_districts(facilities, districts)
 district_to_state = build_district_to_state(india_post, nfhs)
 
+# Build facility metadata sidecar
 facility_meta = facilities[["facility_id", "facility_name"]].copy()
-facility_meta["district_id"] = facilities_with_district["district_id"].fillna("UNKNOWN")
-facility_meta["district_name"] = facilities_with_district["spatial_district"].fillna("Unknown")
+facility_meta["district_id"] = (
+    facilities_with_district["spatial_district"]
+    .str.lower()
+    .str.replace(r"[^a-z0-9]", "", regex=True)
+)
+facility_meta["district_name"] = facilities_with_district["spatial_district"]
 facility_meta["state_name"] = (
     facilities_with_district["spatial_district"]
     .map(district_to_state)
     .fillna(facilities.get("address_stateOrRegion", pd.Series(dtype=str)))
-    .fillna("Unknown")
 )
 
-# COMMAND ----------
-# ── 6. phantom_verdicts gold (dual-verdict columns + AI cache cols nulled) ────
+verdicts = outputs.phantom_verdicts.merge(facility_meta, on="facility_id", how="left")
 
-verdicts_gold = outputs.phantom_verdicts.merge(facility_meta, on="facility_id", how="left")
-verdicts_gold["test_outcome_vector"] = verdicts_gold["test_outcome_vector"].apply(
+# Serialise test_outcome_vector (list[dict]) → JSON string for Delta storage
+verdicts["test_outcome_vector"] = verdicts["test_outcome_vector"].apply(
     lambda v: json.dumps(v) if v is not None else "[]"
 )
-verdicts_gold["rescue_applied"] = verdicts_gold["rescue_applied"].apply(
-    lambda v: json.dumps(v) if v is not None else None
-)
-verdicts_gold["layer_c_synthesis"] = verdicts_gold["layer_c_synthesis"].apply(
-    lambda v: json.dumps(v) if v is not None else None
-)
-verdicts_gold["ai_recommendation"] = None
-verdicts_gold["ai_recommendation_evidence_state"] = None
-verdicts_gold["override_id"] = None
 
-verdicts_gold = verdicts_gold[[
-    "facility_id", "adjudicator_verdict", "verdict", "reason",
-    "rescue_applied", "test_outcome_vector", "layer_c_synthesis",
-    "ai_recommendation", "ai_recommendation_evidence_state",
-    "override_id", "ran_at",
-]].drop_duplicates(subset=["facility_id"])
+verdicts = verdicts[
+    ["facility_id", "facility_name", "district_id", "district_name",
+     "state_name", "verdict", "reason", "test_outcome_vector", "ran_at"]
+].drop_duplicates(subset=["facility_id"])
 
-print(f"phantom_verdicts: {len(verdicts_gold):,} rows")
+print(f"phantom_verdicts enriched: {len(verdicts):,} rows, "
+      f"{verdicts['district_name'].nunique()} districts")
 
 # COMMAND ----------
-# ── 7. facility_existence_tests gold ──────────────────────────────────────────
+# ── 6. Enrich facility_existence_tests ────────────────────────────────────────
 
-tests_gold = outputs.facility_existence_tests.copy()
-tests_gold["evidence_ref"] = tests_gold["evidence_ref"].apply(
+tests = outputs.facility_existence_tests.copy()
+tests["evidence_ref"] = tests["evidence_ref"].apply(
     lambda v: json.dumps(v) if isinstance(v, (dict, list)) else
               ("null" if v is None else json.dumps(str(v)))
 )
-tests_gold = tests_gold[["facility_id", "test_name", "result", "evidence_ref", "ran_at"]]
-print(f"facility_existence_tests: {len(tests_gold):,} rows")
+tests = (
+    tests[["facility_id", "test_name", "result", "evidence_ref", "ran_at"]]
+    .drop_duplicates(subset=["facility_id", "test_name"], keep="last")
+)
 
 # COMMAND ----------
-# ── 8. description_embeddings gold (one row per (facility_id, snapshot_id)) ───
+# ── 7. Compute desert scores per district per capability ──────────────────────
+# CAPABILITIES is imported from phantom_census.desert_scoring.tiles so the
+# scoring loop, the tile render, and the Lakebase load all share one source.
 
-embeddings_gold = pd.DataFrame([
-    {"facility_id": fid, "snapshot_id": snapshot_id,
-     "embedding": blob, "computed_at": ran_at}
-    for fid, blob in outputs.description_embeddings.items()
-])
-print(f"description_embeddings: {len(embeddings_gold):,} rows")
+CAPABILITY_KEYWORDS: dict[str, list[str]] = {
+    "maternity": ["maternity", "delivery", "obstetric", "antenatal", "postnatal",
+                  "labour", "labor", "cesarean", "caesarean", "gynaecol", "gynecol",
+                  "neonatal", "prenatal"],
+    "icu":       ["icu", "intensive care", "critical care", "ventilat", "icu bed"],
+    "emergency": ["emergency", "casualty", "accident", "urgent care", "24.*hour"],
+    "trauma":    ["trauma", "burns", "burn", "orthopedic", "orthopaedic",
+                  "fracture", "surgery", "surgical", "operation theatre"],
+    "nicu":      ["nicu", "neonatal", "newborn", "premature", "incubator"],
+}
 
-# COMMAND ----------
-# ── 9. facility_capabilities gold (one row per (facility_id, capability)) ─────
 
-capability_rows = []
-for fid, caps in outputs.facility_capabilities.items():
-    for cap in caps or []:
-        capability_rows.append({"facility_id": fid, "capability": cap})
-capabilities_gold = pd.DataFrame(capability_rows, columns=["facility_id", "capability"])
-print(f"facility_capabilities: {len(capabilities_gold):,} rows")
+def _claims_text(row: pd.Series) -> str:
+    parts = [
+        row.get("capability") or "",
+        row.get("procedure") or "",
+        row.get("equipment") or "",
+        row.get("description") or "",
+    ]
+    return " ".join(str(p) for p in parts if p and str(p) != "nan").lower()
 
-# COMMAND ----------
-# ── 10. desert_scores gold (per-capability) ───────────────────────────────────
 
-CAPABILITIES = sorted({c for caps in outputs.facility_capabilities.values() for c in caps})
-print(f"capabilities present: {CAPABILITIES}")
+facilities_claims = facilities.copy()
+facilities_claims["_claims_text"] = facilities_claims.apply(_claims_text, axis=1)
 
-# Build per-facility verdict + meta + capability for grouping
-fac_v = verdicts_gold[["facility_id", "verdict"]].merge(
-    facility_meta, on="facility_id", how="left"
+for cap, keywords in CAPABILITY_KEYWORDS.items():
+    pat = "|".join(re.escape(k) for k in keywords)
+    facilities_claims[f"claims_{cap}"] = facilities_claims["_claims_text"].str.contains(
+        pat, case=False, regex=True, na=False
+    )
+
+# Merge facility metadata into verdicts for scoring
+verdicts_meta = verdicts.merge(
+    facilities_claims[["facility_id"] + [f"claims_{c}" for c in CAPABILITIES]],
+    on="facility_id",
+    how="left",
 )
 
 score_rows: list[dict] = []
-for cap in CAPABILITIES:
-    fac_ids_for_cap = capabilities_gold.loc[
-        capabilities_gold["capability"] == cap, "facility_id"
-    ]
-    cap_df = fac_v[fac_v["facility_id"].isin(fac_ids_for_cap)].copy()
-    if cap_df.empty:
-        continue
 
-    agg = cap_df.groupby(["district_id", "district_name", "state_name"]).agg(
+for cap in CAPABILITIES:
+    cap_df = verdicts_meta[verdicts_meta[f"claims_{cap}"].fillna(False)].copy()
+
+    # Group only on district_id — district_name/state_name vary in casing
+    # across facilities for the same district, which would produce duplicate
+    # (district_id, capability) rows and violate the Lakebase PK.
+    district_agg = cap_df.groupby("district_id", as_index=False).agg(
+        district_name=("district_name", "first"),
+        state_name=("state_name", "first"),
         phantom_count=("verdict", lambda x: (x == "phantom").sum()),
         real_count=("verdict", lambda x: (x == "real").sum()),
         contested_count=("verdict", lambda x: (x == "contested").sum()),
-    ).reset_index()
-    agg["verified_facility_count"] = agg["real_count"] + agg["contested_count"]
+    )
 
-    # Per-state normalization. Higher → more underserved.
-    by_state = agg.groupby("state_name")
-    max_count = by_state["verified_facility_count"].transform("max").clip(lower=1)
-    agg["max_density"] = max_count.astype(float)
-    agg["burden_weight"] = 0.5   # placeholder — gets refined when NFHS join is wired
-    agg["raw_desert_score"] = (
-        1.0 - (agg["verified_facility_count"] + agg["phantom_count"]) / max_count
-    ).clip(0, 1)
-    agg["adjusted_desert_score"] = (
-        1.0 - agg["verified_facility_count"] / max_count
-    ).clip(0, 1)
-    agg["capability"] = cap
-    agg["burden_imputed"] = False
-    agg["nfhs_missing"] = False
-    agg["updated_at"] = ran_at
+    district_agg["total_count"] = (
+        district_agg["phantom_count"]
+        + district_agg["real_count"]
+        + district_agg["contested_count"]
+    )
+    district_agg["verified_facility_count"] = (
+        district_agg["real_count"] + district_agg["contested_count"]
+    )
 
-    score_rows.append(agg[[
+    # Desert score = inverse facility density, normalised within state.
+    # Higher score → more underserved (fewer verified facilities relative to peers).
+    by_state = district_agg.groupby("state_name")
+    district_agg["_max_raw"] = by_state["total_count"].transform("max").clip(lower=1)
+    district_agg["_max_verified"] = by_state["verified_facility_count"].transform("max").clip(lower=1)
+
+    district_agg["raw_desert_score"] = (
+        1.0 - district_agg["total_count"] / district_agg["_max_raw"]
+    ).clip(0, 1)
+    district_agg["adjusted_desert_score"] = (
+        1.0 - district_agg["verified_facility_count"] / district_agg["_max_verified"]
+    ).clip(0, 1)
+
+    district_agg["capability"] = cap
+    district_agg["burden_imputed"] = False
+    district_agg["updated_at"] = ran_at
+
+    score_rows.append(district_agg[[
         "district_id", "district_name", "state_name", "capability",
         "raw_desert_score", "adjusted_desert_score",
-        "verified_facility_count", "phantom_count",
-        "burden_imputed", "nfhs_missing", "burden_weight", "max_density",
-        "updated_at",
+        "verified_facility_count", "phantom_count", "contested_count",
+        "total_count", "burden_imputed", "updated_at",
     ]])
 
-desert_scores_gold = pd.concat(score_rows, ignore_index=True) if score_rows else pd.DataFrame()
-print(f"desert_scores: {len(desert_scores_gold):,} rows across {len(CAPABILITIES)} capabilities")
+desert_scores = pd.concat(score_rows, ignore_index=True)
+print(f"desert_scores: {len(desert_scores):,} rows across {len(CAPABILITIES)} capabilities")
+
+# Precompute per-capability ranks and rank shift for tile markers + lakebase write
+desert_scores["raw_rank"] = (
+    desert_scores.groupby("capability")["raw_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
+desert_scores["adjusted_rank"] = (
+    desert_scores.groupby("capability")["adjusted_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
+# rank_shift > 0: district became MORE underserved after phantom removal (phantoms were hiding it)
+desert_scores["rank_shift"] = desert_scores["raw_rank"] - desert_scores["adjusted_rank"]
+
+top_shifts = (
+    desert_scores[desert_scores["capability"] == "maternity"]
+    .nlargest(5, "rank_shift")[["district_name", "state_name", "raw_rank", "adjusted_rank", "rank_shift"]]
+)
+print("\nTop 5 district rank shifts (maternity, raw_rank − adjusted_rank):")
+print(top_shifts.to_string(index=False))
 
 # COMMAND ----------
-# ── 11. budget_allocations gold (hand-curated Q3 demo allocation) ────────────
+# ── 8. Generate Folium choropleth HTML tiles ──────────────────────────────────
 
-# Demo-time hand-curated allocation. Per LP-SCHEMA-BUDGET-002 this table is
-# read-only from the app's perspective; the recommendation is exported to CSV.
-# We seed one row per (district_id, capability='maternity', quarter='2026-Q3')
-# based on prior-quarter facility count.
+def build_choropleth(
+    districts_gdf: gpd.GeoDataFrame,
+    scores_df: pd.DataFrame,
+    score_col: str,
+    title: str,
+    colormap: str = "RdYlGn_r",
+) -> str:
+    from shapely.geometry import box as shapely_box
 
-QUARTER = "2026-Q3"
-PER_FACILITY_INR = 5_000_000   # ₹50 Lakh per verified facility, demo proxy
+    merge_cols = ["district_name", "district_id", score_col]
+    if "rank_shift" in scores_df.columns:
+        merge_cols += ["rank_shift", "phantom_count"]
 
-if not desert_scores_gold.empty:
-    budget_seed = desert_scores_gold[desert_scores_gold["capability"] == "maternity"]
-    if budget_seed.empty:
-        budget_seed = desert_scores_gold[
-            desert_scores_gold["capability"] == desert_scores_gold["capability"].iloc[0]
-        ]
-    budget_allocations_gold = pd.DataFrame({
-        "district_id":   budget_seed["district_id"].values,
-        "state_name":    budget_seed["state_name"].values,
-        "capability":    "maternity",
-        "quarter":       QUARTER,
-        "allocated_inr": (
-            budget_seed["verified_facility_count"].fillna(0).astype(int)
-            * PER_FACILITY_INR
-        ).values,
-        "loaded_at":     ran_at,
-    })
-else:
-    budget_allocations_gold = pd.DataFrame(columns=[
-        "district_id", "state_name", "capability", "quarter",
-        "allocated_inr", "loaded_at",
-    ])
+    merged = districts_gdf.merge(
+        scores_df[merge_cols],
+        left_on="district",
+        right_on="district_name",
+        how="left",
+    )
+    merged[score_col] = merged[score_col].fillna(0.5)
 
-print(f"budget_allocations: {len(budget_allocations_gold):,} rows")
+    # Clip to India's bounding box — geoBoundaries J&K and Ladakh polygons
+    # extend into Pakistan/China-administered disputed territory.
+    merged = merged.clip(shapely_box(68.0, 6.0, 97.5, 37.5))
+
+    # Simplify district polygon geometry before embedding as GeoJSON.
+    # 0.01° tolerance (~1 km at India's latitude) cuts vertex count 10–50×
+    # and makes the tile HTML small enough for fast browser rendering.
+    merged["geometry"] = merged["geometry"].simplify(0.01, preserve_topology=True)
+
+    m = folium.Map(location=[22.0, 79.0], zoom_start=5, tiles="CartoDB positron")
+
+    folium.Choropleth(
+        geo_data=merged.__geo_interface__,
+        data=merged[["district", score_col]],
+        columns=["district", score_col],
+        key_on="feature.properties.district",
+        fill_color=colormap,
+        fill_opacity=0.65,
+        line_opacity=0.2,
+        legend_name=title,
+        nan_fill_color="#d0d0d0",
+    ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+
+    # Orange circle markers on districts most exposed by phantom removal.
+    # rank_shift = raw_rank - adjusted_rank; higher = district jumped up the "underserved" list.
+    if "rank_shift" in merged.columns:
+        shift_col = merged["rank_shift"].fillna(0)
+        threshold = max(15, int(shift_col.quantile(0.80)))
+        movers = merged[shift_col >= threshold].nlargest(30, "rank_shift")
+        for _, row in movers.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+            centroid = geom.centroid
+            shift = int(row["rank_shift"])
+            phantoms = int(row.get("phantom_count", 0))
+            radius = max(5, min(16, shift // 10))
+            folium.CircleMarker(
+                location=[centroid.y, centroid.x],
+                radius=radius,
+                color="#9a3412",
+                weight=1.5,
+                fill=True,
+                fill_color="#f97316",
+                fill_opacity=0.75,
+                tooltip=(
+                    f"<b>{row['district_name']}</b><br>"
+                    f"+{shift} rank positions exposed<br>"
+                    f"{phantoms} phantoms removed"
+                ),
+            ).add_to(m)
+
+    # Inject Leaflet click + focus + hover handlers.
+    # On click: highlight + zoom + postMessage district_id to React parent.
+    # On inbound 'phantom-census-focus-district': zoom + highlight from table selection.
+    # hovered tracks the last mouseover layer to self-heal stuck hover styles.
+    m.get_root().html.add_child(folium.Element("""
+<script>
+(function waitForMap() {
+    var keys = Object.keys(window).filter(function(k) {
+        return k.startsWith('map_') && window[k] && window[k]._layers;
+    });
+    if (!keys.length) { setTimeout(waitForMap, 150); return; }
+    var m = window[keys[0]], layerMap = {}, active = null, gjLayer = null;
+
+    function hi(fl) {
+        if (active && gjLayer) gjLayer.resetStyle(active);
+        fl.setStyle({fillOpacity: 0.4, weight: 2, color: '#111'});
+        active = fl;
+    }
+
+    m.eachLayer(function(l) {
+        if (!l.eachLayer) return;
+        gjLayer = l;
+        l.eachLayer(function(fl) {
+            if (!fl.feature) return;
+            var did = fl.feature.properties.district_id;
+            if (did) layerMap[did] = fl;
+            fl.on('click', function() {
+                var p = fl.feature.properties;
+                hi(fl);
+                m.fitBounds(fl.getBounds(), {padding: [30, 30]});
+                window.parent.postMessage({
+                    type: 'phantom-census-district-click',
+                    districtId: p.district_id || null,
+                    districtName: p.district || null
+                }, '*');
+            });
+        });
+    });
+
+    window.addEventListener('message', function(e) {
+        if (e.data && e.data.type === 'phantom-census-focus-district') {
+            var fl = layerMap[e.data.districtId];
+            if (fl) { hi(fl); m.fitBounds(fl.getBounds(), {padding: [30, 30]}); }
+        }
+    });
+
+    var c = document.querySelector('.leaflet-container');
+    if (c) c.style.cursor = 'pointer';
+})();
+</script>
+"""))
+
+    return m._repr_html_()
+
+
+tile_rows: list[dict] = []
+
+for cap in CAPABILITIES:
+    cap_scores = desert_scores[desert_scores["capability"] == cap]
+    try:
+        html = build_choropleth(
+            districts, cap_scores,
+            "adjusted_desert_score",
+            f"{cap.title()} desert — phantom adjusted",
+        )
+        tile_rows.append({
+            "capability": cap,
+            "layer_type": "adjusted",
+            "html": html,
+            "rendered_at": ran_at,
+        })
+        print(f"  tile {cap}/adjusted: {len(html):,} chars")
+    except Exception as exc:
+        print(f"  WARN: tile {cap}/adjusted failed — {exc}")
+
+tiles_df = pd.DataFrame(tile_rows)
+print(f"\ntile_layers: {len(tiles_df)} tiles generated")
+
+# Fail the batch rather than write a partial tile_layers set: every capability
+# must have both a raw and an adjusted tile (issue #5 — adjusted-only regression).
+validate_tile_layers(tiles_df, CAPABILITIES)
 
 # COMMAND ----------
-# ── 12. facilities slim sidecar (for map scatter + audit queue) ──────────────
-
-facilities_slim = facilities[[
-    "facility_id", "facility_name", "address_city", "address_stateOrRegion",
-    "latitude", "longitude", "pincode", "capability", "description", "yearEstablished",
-]].drop_duplicates(subset=["facility_id"]).copy()
-print(f"facilities: {len(facilities_slim):,} rows")
-
-# COMMAND ----------
-# ── 13. Write gold Delta tables to Unity Catalog ──────────────────────────────
+# ── 9. Write gold Delta tables to Unity Catalog ───────────────────────────────
 
 GOLD_CATALOG = "workspace"
 GOLD_SCHEMA = "phantom_census"
@@ -314,89 +468,33 @@ GOLD_SCHEMA = "phantom_census"
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GOLD_CATALOG}.{GOLD_SCHEMA}")
 
 
+def _strip_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].apply(lambda v: v.replace("\x00", "") if isinstance(v, str) else v)
+    return df
+
+
 def write_gold(df: pd.DataFrame, table: str) -> None:
     fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.{table}"
-    if df.empty:
-        print(f"  ✗ {fqn}: empty — skipped")
-        return
+    df = _strip_null_bytes(df.copy())
     sdf = spark.createDataFrame(df)
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(fqn)
     print(f"  ✓ {fqn}: {sdf.count():,} rows")
 
 
-# Batch-owned columns per LP-EE-002. The MERGE updates ONLY these columns,
-# preserving the app-mutable columns (`ai_recommendation`,
-# `ai_recommendation_evidence_state`, `override_id`) across re-runs so a
-# planner's accumulated overrides + AI cache writes survive a refresh.
-_BATCH_OWNED_VERDICT_COLS = (
-    "adjudicator_verdict", "verdict", "reason", "rescue_applied",
-    "test_outcome_vector", "layer_c_synthesis", "ran_at",
-)
-
-
-def write_gold_phantom_verdicts_merge(df: pd.DataFrame) -> None:
-    """Idempotent write for phantom_verdicts that mirrors writer.py's LP-EE-002
-    preservation contract.
-
-    First run (target table doesn't exist): plain CREATE-from-staging.
-    Re-runs: MERGE staging INTO target on facility_id, updating only the
-    batch-owned columns. `ai_recommendation`, `ai_recommendation_evidence_state`,
-    and `override_id` are NEVER touched here — they're owned by the app's
-    LP-AI-CACHE and LP-OVR write paths.
-    """
-    fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.phantom_verdicts"
-    staging = f"{fqn}_staging"
-    if df.empty:
-        print(f"  ✗ {fqn}: empty — skipped")
-        return
-
-    sdf = spark.createDataFrame(df)
-    sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(staging)
-
-    if not spark.catalog.tableExists(fqn):
-        spark.sql(f"CREATE TABLE {fqn} AS SELECT * FROM {staging}")
-        spark.sql(f"DROP TABLE {staging}")
-        print(f"  ✓ {fqn}: {sdf.count():,} rows (initial CREATE)")
-        return
-
-    set_clauses = ",\n              ".join(
-        f"target.{c} = source.{c}" for c in _BATCH_OWNED_VERDICT_COLS
-    )
-    spark.sql(f"""
-        MERGE INTO {fqn} AS target
-        USING {staging} AS source
-        ON target.facility_id = source.facility_id
-        WHEN MATCHED THEN UPDATE SET
-              {set_clauses}
-        WHEN NOT MATCHED THEN INSERT *
-    """)
-    spark.sql(f"DROP TABLE {staging}")
-    print(f"  ✓ {fqn}: {sdf.count():,} rows (MERGE — app cache + override_id preserved)")
-
-
 print("Writing gold tables...")
-write_gold(facilities_slim,                  "facilities")
-write_gold_phantom_verdicts_merge(verdicts_gold)
-write_gold(tests_gold,                       "facility_existence_tests")
-write_gold(desert_scores_gold,               "desert_scores")
-write_gold(embeddings_gold,                  "description_embeddings")
-write_gold(capabilities_gold,                "facility_capabilities")
-write_gold(budget_allocations_gold,          "budget_allocations")
+write_gold(verdicts,      "phantom_verdicts")
+write_gold(tests,         "facility_existence_tests")
+write_gold(desert_scores, "desert_scores")
+write_gold(tiles_df,      "tile_layers")
 
-print("\nAll gold tables written. Next: docs/setup-synced-tables.sh creates "
-      "synced tables in Lakebase + grants the app SP SELECT.")
+# Also write the facilities table for lookup by the app.
+# unique_id is not guaranteed unique in the VF dataset — deduplicate before writing.
+facilities_slim = facilities[[
+    "facility_id", "facility_name", "address_city", "address_stateOrRegion",
+    "latitude", "longitude", "pincode", "capability", "description", "yearEstablished",
+]].drop_duplicates(subset=["facility_id"]).copy()
+write_gold(facilities_slim, "facilities")
 
-# COMMAND ----------
-# ── 14. Enable CDF for future TRIGGERED-mode sync ─────────────────────────────
-
-for table in (
-    "facilities", "phantom_verdicts", "facility_existence_tests",
-    "desert_scores", "description_embeddings", "facility_capabilities",
-    "budget_allocations",
-):
-    fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.{table}"
-    spark.sql(
-        f"ALTER TABLE {fqn} "
-        f"SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
-    )
-    print(f"  CDF enabled: {fqn}")
+print("\nAll gold tables written. Run notebooks/lakebase_load to push to Lakebase,")
+print("or use the phantom-census-pipeline job which chains both automatically.")

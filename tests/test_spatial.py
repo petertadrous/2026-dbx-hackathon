@@ -17,22 +17,12 @@ def test_assign_districts_returns_matching_district(facilities_minimal, district
 
 
 # @spec EE-SPATIAL-001
-def test_assign_districts_writes_shapeid_as_canonical_district_id(
-    facilities_minimal, districts_minimal,
-):
-    out = spatial.assign_districts(facilities_minimal, districts_minimal)
-    assert "district_id" in out.columns
-    assert out.iloc[0]["district_id"] == "IND-ADM2-MUMBAI"
-
-
-# @spec EE-SPATIAL-001
 def test_assign_districts_nan_when_no_latlon(districts_minimal):
     facilities = pd.DataFrame(
         [{"facility_id": "X1", "latitude": None, "longitude": None}]
     )
     out = spatial.assign_districts(facilities, districts_minimal)
     assert pd.isna(out.iloc[0]["spatial_district"])
-    assert pd.isna(out.iloc[0]["district_id"])
 
 
 # @spec EE-SPATIAL-003

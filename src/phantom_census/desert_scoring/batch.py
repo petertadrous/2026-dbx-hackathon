@@ -1,11 +1,6 @@
-"""Batch run — read from Lakebase, compute scores, write back desert_scores.
+"""Batch run — read from Lakebase, compute scores, write back scores + tile layers.
 
-The choropleth render is owned by the Planner Workspace's pydeck GeoJsonLayer
-reading `operational.desert_scores` directly (DS-MAP-003); no Folium tile
-pre-rendering happens here.
-
-@spec DS-SCORE-001, DS-SCORE-002, DS-SCORE-003, DS-SCORE-004, DS-SCORE-005,
-@spec DS-SCORE-006, DS-MAP-001, DS-MAP-002, DS-MAP-003
+@spec DS-SCORE-001..005, DS-TILE-001, DS-TILE-001a, DS-TILE-002
 """
 from __future__ import annotations
 
@@ -16,8 +11,8 @@ import geopandas as gpd
 import pandas as pd
 from sqlalchemy import Engine, text
 
-from .density import compute_max_density_per_km2
 from .formula import compute_district_scores
+from .tiles import render_tile_html
 
 # Real NFHS-5 exports use a variety of column names; normalize on read so the
 # rest of the segment can rely on the canonical {district_id, state_name,
@@ -85,22 +80,11 @@ def run_desert_scoring(
     if facilities.empty or verdicts.empty:
         return 0
 
-    # DS-SCORE-006: compute the per-state max_facility_count_per_km2 once and
-    # pass it as the formula denominator so overrides preserve normalization.
-    districts_gdf_full = _load_districts(Path(districts_path))
-    max_density = compute_max_density_per_km2(
-        facilities_with_district=facilities,
-        verdicts=verdicts,
-        districts=districts_gdf_full,
-        state_name=state_filter or "",
-    )
-
     scores = compute_district_scores(
         facilities_with_district=facilities,
         verdicts=verdicts,
         nfhs=nfhs,
         capability=capability,
-        max_density=max_density if max_density > 0 else None,
     )
 
     rows = scores.to_dict(orient="records")
@@ -146,6 +130,30 @@ def run_desert_scoring(
                     "max_density": float(r["max_density"]),
                     "ts": ran_at,
                 },
+            )
+
+    districts_gdf = _load_districts(Path(districts_path))
+    if state_filter is not None:
+        in_state = set(scores["district_id"])
+        districts_gdf = districts_gdf[districts_gdf["district_id"].isin(in_state)]
+    raw_html = render_tile_html(districts_gdf, scores,
+                                score_col="raw_desert_score",
+                                capability=capability)
+    adj_html = render_tile_html(districts_gdf, scores,
+                                score_col="adjusted_desert_score",
+                                capability=capability)
+
+    with engine.begin() as conn:
+        for layer_type, html in (("raw", raw_html), ("adjusted", adj_html)):
+            conn.execute(
+                text("""
+                    INSERT INTO cache.tile_layers (capability, layer_type, html, rendered_at)
+                    VALUES (:cap, :lt, :html, :ts)
+                    ON CONFLICT (capability, layer_type) DO UPDATE SET
+                        html = EXCLUDED.html,
+                        rendered_at = EXCLUDED.rendered_at
+                """),
+                {"cap": capability, "lt": layer_type, "html": html, "ts": ran_at},
             )
 
     return len(rows)

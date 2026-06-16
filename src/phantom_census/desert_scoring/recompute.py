@@ -1,7 +1,6 @@
 """Single-district incremental recompute.
 
-@spec DS-OVR-001, DS-OVR-002, DS-OVR-003, DS-OVR-004, DS-OVR-005, DS-OVR-006,
-@spec DS-MULTICAP-001, DS-MULTICAP-002, DS-MULTICAP-003
+@spec DS-OVR-001, DS-OVR-002, DS-OVR-003, DS-OVR-004
 """
 from __future__ import annotations
 
@@ -31,10 +30,6 @@ def recompute_in_memory(
     supply the same `max_density` that was used to build `previous_scores`
     (otherwise the affected district's new score is no longer comparable to
     the untouched siblings).
-
-    DS-OVR-005: `burden_imputed` and `nfhs_missing` are recomputed from
-    the same NFHS frame used at batch time, so they carry through unchanged
-    when the NFHS row hasn't moved.
     """
     fresh = compute_district_scores(
         facilities_with_district=facilities_with_district,
@@ -58,37 +53,19 @@ def recompute_in_memory(
     return out
 
 
-def _lookup_facility_capabilities(
-    conn: Connection, facility_id: str | None, default_capability: str,
-) -> list[str]:
-    """Return the capabilities a facility claims, per DS-MULTICAP-001.
-
-    Reads `operational.facility_capabilities` populated by the LP engine writer.
-    Falls back to `[default_capability]` when no facility_id is given or no
-    capability rows exist for that facility (a defensive default that matches
-    the workspace's actively-viewed capability).
-    """
-    if facility_id is None:
-        return [default_capability]
-    rows = conn.execute(
-        text(
-            "SELECT capability FROM operational.facility_capabilities "
-            "WHERE facility_id = :fid ORDER BY capability"
-        ),
-        {"fid": facility_id},
-    ).fetchall()
-    caps = [r.capability for r in rows]
-    return caps or [default_capability]
-
-
-def _recompute_one_row(
-    conn: Connection, *, district_id: str, capability: str, ran_at: datetime,
+# @spec DS-OVR-001, DS-OVR-003
+def recompute_district(
+    conn: Connection, district_id: str, capability: str
 ) -> None:
-    """Update a single `(district_id, capability)` row in desert_scores.
+    """Recompute a single district's row in `operational.desert_scores`.
 
-    Preserves `burden_imputed`, `burden_weight`, `max_density`, `nfhs_missing`
-    (DS-OVR-005) — they're per-district NFHS properties unaffected by
-    count-driven mutations.
+    Called by `lakebase.overrides.apply_override` as the `recompute_fn` callback;
+    runs on the caller's already-open Connection so the update participates in
+    the same transaction as the override + verdict update (LP-OVR-004).
+
+    Reads the existing `desert_scores` row to recover `max_density` and
+    `burden_weight` (persisted by the batch run) so the recomputed score stays
+    comparable to the other rows in the table — no fake NFHS placeholders.
     """
     existing = conn.execute(
         text(
@@ -102,32 +79,16 @@ def _recompute_one_row(
     if existing is None:
         return
 
-    # Count verified vs phantom across the district's facilities AND restrict
-    # to facilities claiming this capability — multi-cap facilities only
-    # count toward the capability rows they participate in.
     facilities = pd.DataFrame(
         conn.execute(
             text(
-                "SELECT x.facility_id "
+                "SELECT x.facility_id, x.district_id "
                 "FROM operational.facility_district_xref x "
-                "JOIN operational.facility_capabilities fc USING (facility_id) "
-                "WHERE x.district_id = :did AND fc.capability = :cap"
+                "WHERE x.district_id = :did"
             ),
-            {"did": district_id, "cap": capability},
+            {"did": district_id},
         ).mappings().all()
     )
-    if facilities.empty:
-        # No capability rows yet — fall back to counting every facility in the
-        # district (the original single-capability batch behavior).
-        facilities = pd.DataFrame(
-            conn.execute(
-                text(
-                    "SELECT facility_id FROM operational.facility_district_xref "
-                    "WHERE district_id = :did"
-                ),
-                {"did": district_id},
-            ).mappings().all()
-        )
     if facilities.empty:
         return
 
@@ -150,8 +111,6 @@ def _recompute_one_row(
     adjusted = max(0.0, min(1.0,
                             (1.0 - (verified - phantom) / denom) * weight))
 
-    # DS-OVR-005: burden_imputed, burden_weight, max_density, nfhs_missing
-    # are deliberately omitted from the UPDATE.
     conn.execute(
         text("""
             UPDATE operational.desert_scores
@@ -167,47 +126,8 @@ def _recompute_one_row(
             "adj": adjusted,
             "ver": verified,
             "ph": phantom,
-            "ts": ran_at,
+            "ts": datetime.now(tz=timezone.utc),
             "did": district_id,
             "cap": capability,
         },
     )
-
-
-# @spec DS-OVR-001, DS-OVR-002, DS-OVR-005, DS-MULTICAP-001
-def recompute_district(
-    conn: Connection,
-    district_id: str,
-    capability: str,
-    *,
-    facility_id: str | None = None,
-) -> list[str]:
-    """Recompute every desert_scores row a facility participates in.
-
-    Called by ``lakebase.overrides.submit_override`` as the ``recompute_fn``
-    callback; runs on the caller's already-open Connection so the update
-    participates in the same transaction as the override + verdict update
-    (LP-OVR-005).
-
-    When `facility_id` is supplied, the function reads
-    ``operational.facility_capabilities`` to enumerate every capability the
-    facility claims (DS-MULTICAP-001) and updates each
-    ``(district_id, capability)`` row. `capability` is treated as the planner's
-    currently-active view and is used as the fallback when the facility has no
-    capability rows (defensive).
-
-    DS-OVR-002: ``max_facility_count_per_km2`` is NOT recomputed — the existing
-    `desert_scores.max_density` is read back and reused.
-    """
-    ran_at = datetime.now(tz=timezone.utc)
-    capabilities = _lookup_facility_capabilities(
-        conn, facility_id, default_capability=capability,
-    )
-
-    affected: list[str] = []
-    for cap in capabilities:
-        _recompute_one_row(
-            conn, district_id=district_id, capability=cap, ran_at=ran_at,
-        )
-        affected.append(cap)
-    return affected

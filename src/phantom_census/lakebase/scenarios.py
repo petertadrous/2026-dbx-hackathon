@@ -1,6 +1,6 @@
 """Scenario save/restore.
 
-@spec LP-SCEN-001, LP-SCEN-002, LP-SCEN-003, LP-SCEN-004, LP-SCEN-005
+@spec LP-SCEN-001, LP-SCEN-002, LP-SCEN-003, LP-SCEN-004
 """
 from __future__ import annotations
 
@@ -11,11 +11,7 @@ from typing import Callable
 
 from sqlalchemy import Connection, Engine, text
 
-# LP-SCHEMA-VERDICT-002: planner-override verdict enum values.
-_VERDICT_BY_TYPE = {
-    "force-real": "force-real-planner",
-    "force-phantom": "force-phantom-planner",
-}
+_VERDICT_BY_TYPE = {"force-real": "real", "force-phantom": "phantom"}
 
 
 # @spec LP-SCEN-001
@@ -58,7 +54,7 @@ def save_scenario(
     return scenario_id
 
 
-# @spec LP-SCEN-003, LP-SCEN-004, LP-SCEN-005
+# @spec LP-SCEN-003, LP-SCEN-004
 def restore_scenario(
     engine: Engine,
     *,
@@ -90,7 +86,6 @@ def restore_scenario(
             override_set = json.loads(override_set)
 
         touched_districts: list[str] = []
-        touched_facility_by_district: dict[str, str] = {}
 
         for oid in override_set:
             override = conn.execute(
@@ -124,10 +119,8 @@ def restore_scenario(
             ).first()
             if district_row and district_row.district_id not in touched_districts:
                 touched_districts.append(district_row.district_id)
-                touched_facility_by_district[district_row.district_id] = override.facility_id
 
         for district_id in touched_districts:
-            recompute_fn(conn, district_id, capability,
-                         facility_id=touched_facility_by_district.get(district_id))
+            recompute_fn(conn, district_id, capability)
 
     return touched_districts

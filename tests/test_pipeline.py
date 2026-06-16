@@ -22,7 +22,6 @@ def _inputs(facilities_minimal, india_post_minimal, nfhs_minimal,
         hfr=hfr_minimal,
         district_to_state=district_to_state,
         current_year=2026,
-        snapshot_id="2026-06-15-batch-001",
     )
 
 
@@ -35,15 +34,18 @@ def test_pipeline_processes_all_facilities(facilities_minimal, india_post_minima
     assert len(out.phantom_verdicts) == len(facilities_minimal)
 
 
-# @spec EE-PIPE-001
-def test_pipeline_runs_all_six_tests_per_facility(facilities_minimal, india_post_minimal,
-                                                    nfhs_minimal, districts_minimal,
-                                                    hfr_minimal, district_to_state):
+# @spec EE-PIPE-002
+def test_pipeline_emits_one_row_per_test_per_facility(facilities_minimal,
+                                                       india_post_minimal,
+                                                       nfhs_minimal,
+                                                       districts_minimal,
+                                                       hfr_minimal,
+                                                       district_to_state):
     out = run_engine(_inputs(facilities_minimal, india_post_minimal, nfhs_minimal,
                              districts_minimal, hfr_minimal, district_to_state))
     expected_tests = {
         TestName.PIN_LOOKUP.value, TestName.MINHASH.value, TestName.SPATIAL.value,
-        TestName.NFHS.value, TestName.TEMPORAL.value, TestName.EMBEDDING.value,
+        TestName.NFHS.value, TestName.TEMPORAL.value,
     }
     by_fac = out.facility_existence_tests.groupby("facility_id")["test_name"].apply(set)
     for tests in by_fac:
@@ -65,36 +67,14 @@ def test_pipeline_test_rows_carry_ran_at(facilities_minimal, india_post_minimal,
 
 
 # @spec EE-PIPE-003
-def test_pipeline_verdict_table_carries_dual_verdict_and_rescue_columns(
-    facilities_minimal, india_post_minimal, nfhs_minimal, districts_minimal,
-    hfr_minimal, district_to_state,
-):
+def test_pipeline_verdict_table_columns(facilities_minimal, india_post_minimal,
+                                         nfhs_minimal, districts_minimal,
+                                         hfr_minimal, district_to_state):
     out = run_engine(_inputs(facilities_minimal, india_post_minimal, nfhs_minimal,
                              districts_minimal, hfr_minimal, district_to_state))
     cols = set(out.phantom_verdicts.columns)
-    required = {
-        "facility_id", "adjudicator_verdict", "verdict",
-        "rescue_applied", "test_outcome_vector", "ran_at",
-    }
-    assert required <= cols, f"missing: {required - cols}"
-    row = out.phantom_verdicts.iloc[0]
-    assert row["adjudicator_verdict"] in {v.value for v in Verdict}
-    assert row["verdict"] in {v.value for v in Verdict} or row["verdict"] in {
-        "force-real-planner", "force-phantom-planner",
-    }
-
-
-# @spec EE-PIPE-003
-def test_pipeline_test_outcome_vector_has_six_entries(
-    facilities_minimal, india_post_minimal, nfhs_minimal, districts_minimal,
-    hfr_minimal, district_to_state,
-):
-    out = run_engine(_inputs(facilities_minimal, india_post_minimal, nfhs_minimal,
-                             districts_minimal, hfr_minimal, district_to_state))
-    vec = out.phantom_verdicts.iloc[0]["test_outcome_vector"]
-    assert len(vec) == 6
-    names = {o["test_name"] for o in vec}
-    assert TestName.EMBEDDING.value in names
+    assert {"facility_id", "verdict", "test_outcome_vector", "ran_at"} <= cols
+    assert out.phantom_verdicts.iloc[0]["verdict"] in {v.value for v in Verdict}
 
 
 # @spec EE-PIPE-001, EE-NFHS-003
@@ -102,6 +82,8 @@ def test_pipeline_auto_builds_district_to_state_when_omitted(
     facilities_minimal, india_post_minimal, nfhs_minimal, districts_minimal,
     hfr_minimal,
 ):
+    """When EngineInputs.district_to_state is None, pipeline derives it from
+    India Post + NFHS so the caller is not forced to pre-compute the lookup."""
     out = run_engine(EngineInputs(
         facilities=facilities_minimal,
         india_post=india_post_minimal,
@@ -110,7 +92,6 @@ def test_pipeline_auto_builds_district_to_state_when_omitted(
         hfr=hfr_minimal,
         district_to_state=None,
         current_year=None,
-        snapshot_id="2026-06-15-batch-001",
     ))
     assert len(out.phantom_verdicts) == len(facilities_minimal)
 
@@ -143,7 +124,6 @@ def test_pipeline_uses_indeterminate_on_absent_data(india_post_minimal, nfhs_min
         hfr=hfr_minimal,
         district_to_state=district_to_state,
         current_year=2026,
-        snapshot_id="2026-06-15-batch-001",
     ))
     by_test = out.facility_existence_tests.set_index("test_name")
     for tname in (TestName.PIN_LOOKUP, TestName.SPATIAL, TestName.TEMPORAL):
