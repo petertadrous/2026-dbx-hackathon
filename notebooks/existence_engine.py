@@ -57,11 +57,18 @@ print(f"nfhs:       {len(nfhs_raw):,} rows")
 # ── 2. Normalise column names to match engine contracts ───────────────────────
 
 # facilities: unique_id → facility_id, name → facility_name, address_zipOrPostcode → pincode
-facilities = facilities_raw.rename(columns={
-    "unique_id": "facility_id",
-    "name": "facility_name",
-    "address_zipOrPostcode": "pincode",
-})
+# unique_id is not guaranteed unique in the VF dataset — deduplicate before
+# the engine so every signal test emits exactly one row per facility_id.
+facilities = (
+    facilities_raw
+    .rename(columns={
+        "unique_id": "facility_id",
+        "name": "facility_name",
+        "address_zipOrPostcode": "pincode",
+    })
+    .drop_duplicates(subset=["facility_id"])
+    .reset_index(drop=True)
+)
 
 # india_post: statename → state (load_india_post handles this but we're bypassing
 # the file loader here, so do it manually); cast lat/lon to float
