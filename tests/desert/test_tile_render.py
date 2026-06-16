@@ -6,6 +6,7 @@ import pytest
 
 from phantom_census.desert_scoring.formula import compute_district_scores
 from phantom_census.desert_scoring.tiles import (
+    CAPABILITIES,
     build_rank_table,
     phantom_counter,
     render_tile_html,
@@ -13,7 +14,6 @@ from phantom_census.desert_scoring.tiles import (
     validate_tile_layers,
 )
 
-CAPABILITIES = ["maternity", "icu", "emergency", "trauma", "nicu"]
 _GOOD_HTML = "<html><body>leaflet map " + "x" * 60_000 + "</body></html>"
 
 
@@ -147,4 +147,13 @@ def test_validate_tile_layers_raises_on_degenerate_html():
 def test_validate_tile_layers_rejects_html_without_leaflet_marker():
     tiles = _tiles_frame(_complete_rows(), html="x" * 60_000)  # big but not a map
     with pytest.raises(RuntimeError, match="Degenerate"):
+        validate_tile_layers(tiles, CAPABILITIES)
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_rejects_duplicate_pair():
+    # Spec says exactly one per (capability, layer_type) — a duplicate row must
+    # be rejected, not silently collapsed.
+    tiles = _tiles_frame(_complete_rows() + [("maternity", "raw")])
+    with pytest.raises(RuntimeError, match="Duplicate"):
         validate_tile_layers(tiles, CAPABILITIES)

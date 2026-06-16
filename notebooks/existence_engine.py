@@ -39,7 +39,7 @@ from phantom_census.existence_engine.data_loading import (
 )
 from phantom_census.existence_engine.pipeline import EngineInputs, run_engine
 from phantom_census.existence_engine.spatial import assign_districts
-from phantom_census.desert_scoring.tiles import validate_tile_layers
+from phantom_census.desert_scoring.tiles import CAPABILITIES, validate_tile_layers
 
 # COMMAND ----------
 # ── 1. Read bronze UC tables ──────────────────────────────────────────────────
@@ -187,8 +187,8 @@ tests = (
 
 # COMMAND ----------
 # ── 7. Compute desert scores per district per capability ──────────────────────
-
-CAPABILITIES = ["maternity", "icu", "emergency", "trauma", "nicu"]
+# CAPABILITIES is imported from phantom_census.desert_scoring.tiles so the
+# scoring loop, the tile render, and the Lakebase load all share one source.
 
 CAPABILITY_KEYWORDS: dict[str, list[str]] = {
     "maternity": ["maternity", "delivery", "obstetric", "antenatal", "postnatal",
