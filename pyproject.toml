@@ -23,6 +23,7 @@ app = [
     "reportlab>=4.0",
     "boto3>=1.34",
     "requests>=2.31",
+    "databricks-sdk>=0.81",
 ]
 dev = [
     "pytest>=8.0",
@@ -33,6 +34,7 @@ dev = [
     "reportlab>=4.0",
     "boto3>=1.34",
     "requests>=2.31",
+    "databricks-sdk>=0.81",
 ]
 
 [build-system]
