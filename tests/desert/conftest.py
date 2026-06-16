@@ -46,17 +46,24 @@ def small_nfhs() -> pd.DataFrame:
 
 @pytest.fixture
 def small_districts() -> gpd.GeoDataFrame:
+    """District polygons sized for DS-SCORE-006 per-km² density tests.
+
+    Coordinates use a metric-ish projection so polygon `.area` is interpretable
+    as km². EPSG:24378 (Kalianpur 1937 / India zone IIb) is reasonable for
+    Maharashtra; we approximate with planar squares in unit-area coordinates
+    and convert via a constant area_km2 multiplier downstream.
+    """
     beed = Polygon([(75.5, 18.7), (76.5, 18.7), (76.5, 19.4), (75.5, 19.4)])
     mum  = Polygon([(72.7, 18.85), (73.0, 18.85), (73.0, 19.20), (72.7, 19.20)])
     pun  = Polygon([(73.7, 18.4), (74.2, 18.4), (74.2, 18.8), (73.7, 18.8)])
     return gpd.GeoDataFrame(
         [
             {"district_id": "BEED", "district_name": "Beed",
-             "state_name": "Maharashtra", "geometry": beed},
+             "state_name": "Maharashtra", "geometry": beed, "area_km2": 7000.0},
             {"district_id": "MUM",  "district_name": "Mumbai",
-             "state_name": "Maharashtra", "geometry": mum},
+             "state_name": "Maharashtra", "geometry": mum, "area_km2": 500.0},
             {"district_id": "PUN",  "district_name": "Pune",
-             "state_name": "Maharashtra", "geometry": pun},
+             "state_name": "Maharashtra", "geometry": pun, "area_km2": 1500.0},
         ],
         crs="EPSG:4326",
     )

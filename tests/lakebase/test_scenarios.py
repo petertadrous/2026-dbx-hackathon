@@ -75,7 +75,8 @@ def test_get_saved_scenarios_filtered_by_planner(engine, sample_engine_outputs, 
 
 # @spec LP-SCEN-003, LP-SCEN-004
 def test_restore_scenario_reasserts_verdicts(engine, sample_engine_outputs, fresh_planner_id):
-    """After restore, phantom_verdicts state matches what was saved."""
+    """After restore, phantom_verdicts state matches what was saved (with the
+    planner verdict enum value per LP-SCHEMA-VERDICT-002)."""
     from phantom_census.lakebase.scenarios import save_scenario, restore_scenario
     oid = _seed_one_override(engine, sample_engine_outputs, fresh_planner_id)
     sid = save_scenario(engine,
@@ -99,8 +100,45 @@ def test_restore_scenario_reasserts_verdicts(engine, sample_engine_outputs, fres
         row = conn.execute(text(
             "SELECT verdict, override_id FROM operational.phantom_verdicts WHERE facility_id='F2'"
         )).first()
-    assert row.verdict == "real"
+    assert row.verdict == "force-real-planner"
     assert row.override_id == oid
+
+
+# @spec LP-SCEN-005
+def test_restore_scenario_preserves_ai_recommendation_columns(
+    engine, sample_engine_outputs, fresh_planner_id,
+):
+    """LP-SCEN-005 (new): scenario restore does not touch ai_recommendation or
+    ai_recommendation_evidence_state."""
+    from phantom_census.lakebase.scenarios import save_scenario, restore_scenario
+    oid = _seed_one_override(engine, sample_engine_outputs, fresh_planner_id)
+    sid = save_scenario(engine, scenario_name="snap", capability="maternity",
+                        region_filter="Maharashtra", override_ids=[oid],
+                        planner_notes="", planner_id=fresh_planner_id)
+
+    # Pre-populate AI cache columns to test preservation.
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE operational.phantom_verdicts SET
+                ai_recommendation = CAST(:rec AS JSONB),
+                ai_recommendation_evidence_state = :state,
+                verdict = 'phantom', override_id = NULL
+            WHERE facility_id = 'F2'
+        """), {
+            "rec": '{"recommendation": "force-real", "confidence": "low",'
+                   ' "reasoning": "x", "cited_evidence_rows": [], "source": "fma"}',
+            "state": "cafebabe" * 8,
+        })
+
+    restore_scenario(engine, scenario_id=sid, recompute_fn=lambda *a, **kw: None)
+
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT ai_recommendation, ai_recommendation_evidence_state "
+            "FROM operational.phantom_verdicts WHERE facility_id='F2'"
+        )).first()
+    assert row.ai_recommendation is not None
+    assert row.ai_recommendation_evidence_state == "cafebabe" * 8
 
 
 # @spec LP-SCEN-003

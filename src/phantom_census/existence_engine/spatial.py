@@ -30,18 +30,37 @@ def _has_latlon(lat: object, lon: object) -> bool:
 
 # @spec EE-SPATIAL-001, EE-SPATIAL-002
 def assign_districts(facilities: pd.DataFrame, districts: gpd.GeoDataFrame) -> pd.DataFrame:
+    """Point-in-polygon assignment per EE-SPATIAL-001.
+
+    Writes two columns on the facility row:
+      * `spatial_district` — geoBoundaries `shapeName` (human-readable district),
+        used by the NFHS join and the side-panel render.
+      * `district_id` — geoBoundaries `shapeID`, the canonical identifier per
+        EE-SPATIAL-001. Travels downstream into Lakebase + desert-scoring as the
+        district key.
+    """
     out = facilities.copy()
     spatial_district: list[str | None] = []
+    district_id: list[str | None] = []
+    has_shape_id = "shapeID" in districts.columns
 
     for _, fac in facilities.iterrows():
         if not _has_latlon(fac.get("latitude"), fac.get("longitude")):
             spatial_district.append(None)
+            district_id.append(None)
             continue
         pt = Point(float(fac["longitude"]), float(fac["latitude"]))
         hit = districts[districts.contains(pt)]
-        spatial_district.append(hit.iloc[0]["district"] if not hit.empty else None)
+        if hit.empty:
+            spatial_district.append(None)
+            district_id.append(None)
+            continue
+        matched = hit.iloc[0]
+        spatial_district.append(matched["district"])
+        district_id.append(matched["shapeID"] if has_shape_id else None)
 
     out["spatial_district"] = spatial_district
+    out["district_id"] = district_id
     return out
 
 

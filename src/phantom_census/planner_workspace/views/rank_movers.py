@@ -12,7 +12,7 @@ from __future__ import annotations
 import streamlit as st
 from sqlalchemy import Engine
 
-from phantom_census.desert_scoring.tiles import build_rank_table
+from phantom_census.desert_scoring.ranking import build_rank_table
 from phantom_census.lakebase.readers import get_desert_scores
 
 TOP_N = 5

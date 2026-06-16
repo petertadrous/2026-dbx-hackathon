@@ -51,13 +51,19 @@ def india_post_minimal() -> pd.DataFrame:
 
 @pytest.fixture
 def districts_minimal() -> gpd.GeoDataFrame:
-    """Two non-overlapping district polygons covering the test facility coordinates."""
+    """Two non-overlapping district polygons covering the test facility coordinates.
+
+    Carries the geoBoundaries `shapeID` (canonical district_id per EE-SPATIAL-001)
+    alongside the human-readable `district` name (used by NFHS joins).
+    """
     mumbai = Polygon([(72.7, 18.85), (73.0, 18.85), (73.0, 19.20), (72.7, 19.20)])
     patna = Polygon([(85.0, 25.5), (85.3, 25.5), (85.3, 25.7), (85.0, 25.7)])
     return gpd.GeoDataFrame(
         [
-            {"district": "Mumbai", "state": "Maharashtra", "geometry": mumbai},
-            {"district": "Patna", "state": "Bihar", "geometry": patna},
+            {"shapeID": "IND-ADM2-MUMBAI", "district": "Mumbai",
+             "state": "Maharashtra", "geometry": mumbai},
+            {"shapeID": "IND-ADM2-PATNA", "district": "Patna",
+             "state": "Bihar", "geometry": patna},
         ],
         crs="EPSG:4326",
     )
