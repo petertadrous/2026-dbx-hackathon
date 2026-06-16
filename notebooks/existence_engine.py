@@ -297,6 +297,8 @@ def build_choropleth(
     title: str,
     colormap: str = "RdYlGn_r",
 ) -> str:
+    from shapely.geometry import box as shapely_box
+
     merged = districts_gdf.merge(
         scores_df[["district_name", score_col]],
         left_on="district",
@@ -304,6 +306,10 @@ def build_choropleth(
         how="left",
     )
     merged[score_col] = merged[score_col].fillna(0.5)
+
+    # Clip to India's bounding box — geoBoundaries J&K and Ladakh polygons
+    # extend into Pakistan/China-administered disputed territory.
+    merged = merged.clip(shapely_box(68.0, 6.0, 97.5, 37.5))
 
     m = folium.Map(location=[22.0, 79.0], zoom_start=5, tiles="CartoDB positron")
 
