@@ -59,7 +59,9 @@ jobs:
       - name: Override bundle workspace host with my workspace
         # The committed bundle file hard-codes Kai's host. Replace the host
         # line with the host from secrets so the bundle deploys to my workspace.
-        run: sed -i -e "s|host: https://.*|host: ${DATABRICKS_HOST}|" databricks.yml
+        # Block scalar avoids YAML mapping confusion from the colons in the sed pattern.
+        run: |
+          sed -i -e "s|host: https://.*|host: ${DATABRICKS_HOST}|" databricks.yml
 
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
