@@ -9,10 +9,9 @@ import {
   Skeleton,
 } from '@databricks/appkit-ui/react';
 import { Activity, BookmarkPlus, CheckCircle2, Database, FileText, MapPinned, RefreshCw, ShieldAlert, XCircle } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 type Capability = 'maternity' | 'icu' | 'emergency' | 'trauma' | 'nicu';
-type ViewMode = 'raw' | 'adjusted';
 
 interface Summary {
   total_facilities: number | string;
@@ -35,7 +34,7 @@ interface DistrictScore {
 }
 
 interface TileLayer {
-  layer_type: ViewMode;
+  layer_type: string;
   html: string;
   rendered_at: string;
 }
@@ -113,7 +112,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export function PlannerWorkspace() {
   const [capability, setCapability] = useState<Capability>('maternity');
-  const [viewMode, setViewMode] = useState<ViewMode>('adjusted');
 
   // Split into three independent data streams for parallel loading
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -139,6 +137,7 @@ export function PlannerWorkspace() {
   const [error, setError] = useState<string | null>(null);
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInitiatedClickRef = useRef(false);
 
   // Phase 1 — fast (~300 ms): summary stats + scenarios
   useEffect(() => {
@@ -188,10 +187,16 @@ export function PlannerWorkspace() {
       .catch(() => setFacilityTests([]));
   }, [selectedFacilityId]);
 
+  const activeTile = useMemo(
+    () => tiles?.find((t) => t.layer_type === 'adjusted'),
+    [tiles],
+  );
+
   // Map → React: receive district click from Folium iframe
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'phantom-census-district-click' && event.data.districtId) {
+        mapInitiatedClickRef.current = true; // map already zoomed — skip round-trip postMessage
         setSelectedDistrictId(event.data.districtId as string);
       }
     };
@@ -199,34 +204,34 @@ export function PlannerWorkspace() {
     return () => window.removeEventListener('message', handler);
   }, []);
 
-  // React → Map: focus + highlight district when selected from table
+  // React → Map: focus + highlight district when selected from table or after tile swap (capability change)
   useEffect(() => {
     if (!selectedDistrictId) return;
+    if (mapInitiatedClickRef.current) {
+      mapInitiatedClickRef.current = false; // map already zoomed from its own click — no round-trip
+      return;
+    }
     const timer = setTimeout(() => {
       const iframe = mapContainerRef.current?.querySelector('iframe');
       iframe?.contentWindow?.postMessage(
         { type: 'phantom-census-focus-district', districtId: selectedDistrictId },
         '*',
       );
-    }, 200);
+    }, 500); // 500ms: new iframes need time to initialise after a tile swap
     return () => clearTimeout(timer);
-  }, [selectedDistrictId]);
+  }, [selectedDistrictId, activeTile]);
 
   const selectedDistrict = useMemo(
     () => scores?.find((s) => s.district_id === selectedDistrictId) ?? null,
     [scores, selectedDistrictId],
   );
 
-  const activeTile = tiles?.find((t) => t.layer_type === viewMode);
-
   const rankedScores = useMemo(
     () =>
-      [...(scores ?? [])].sort((a, b) => {
-        const aScore = viewMode === 'raw' ? a.raw_desert_score : a.adjusted_desert_score;
-        const bScore = viewMode === 'raw' ? b.raw_desert_score : b.adjusted_desert_score;
-        return asNumber(bScore) - asNumber(aScore);
-      }),
-    [scores, viewMode],
+      [...(scores ?? [])].sort(
+        (a, b) => asNumber(b.adjusted_desert_score) - asNumber(a.adjusted_desert_score),
+      ),
+    [scores],
   );
 
   const saveScenario = async () => {
@@ -318,24 +323,6 @@ export function PlannerWorkspace() {
                 </option>
               ))}
             </select>
-            <div className="flex rounded-md border p-1">
-              <Button
-                type="button"
-                size="sm"
-                variant={viewMode === 'raw' ? 'default' : 'ghost'}
-                onClick={() => setViewMode('raw')}
-              >
-                Raw
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={viewMode === 'adjusted' ? 'default' : 'ghost'}
-                onClick={() => setViewMode('adjusted')}
-              >
-                Adjusted
-              </Button>
-            </div>
           </div>
         </div>
       </header>
@@ -372,20 +359,10 @@ export function PlannerWorkspace() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>India Healthcare Desert Map</CardTitle>
-              <Badge variant="secondary">{viewMode === 'raw' ? 'Raw facility count' : 'Phantom adjusted'}</Badge>
+              <Badge variant="secondary">Phantom-adjusted · orange circles = rank movers</Badge>
             </CardHeader>
             <CardContent>
-              {tilesLoading ? (
-                <Skeleton className="h-[420px] w-full" />
-              ) : activeTile ? (
-                <div
-                  ref={mapContainerRef}
-                  className="h-[420px] overflow-hidden rounded-md border"
-                  dangerouslySetInnerHTML={{ __html: activeTile.html }}
-                />
-              ) : (
-                <EmptyMap />
-              )}
+              <MapTile loading={tilesLoading} html={activeTile?.html} innerRef={mapContainerRef} />
             </CardContent>
           </Card>
 
@@ -420,8 +397,8 @@ export function PlannerWorkspace() {
                     </thead>
                     <tbody>
                       {rankedScores.map((score) => {
-                        const activeScore = viewMode === 'raw' ? score.raw_desert_score : score.adjusted_desert_score;
-                        const rankDelta = asNumber(score.adjusted_rank) - asNumber(score.raw_rank);
+                        const activeScore = score.adjusted_desert_score;
+                        const rankDelta = asNumber(score.raw_rank) - asNumber(score.adjusted_rank);
                         return (
                           <tr
                             key={score.district_id}
@@ -665,6 +642,27 @@ function Detail({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+const MapTile = React.memo(function MapTile({
+  loading,
+  html,
+  innerRef,
+}: {
+  loading: boolean;
+  html: string | undefined;
+  innerRef: React.RefObject<HTMLDivElement>;
+}) {
+  if (loading) return <Skeleton className="h-[420px] w-full" />;
+  if (html)
+    return (
+      <div
+        ref={innerRef}
+        className="h-[420px] overflow-hidden rounded-md border"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  return <EmptyMap />;
+});
 
 function EmptyMap() {
   return (

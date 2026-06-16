@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS public.desert_scores (
     updated_at              TIMESTAMPTZ,
     raw_rank                INT,
     adjusted_rank           INT,
+    rank_shift              INT,
     PRIMARY KEY (district_id, capability)
 );
 
@@ -119,9 +120,10 @@ CREATE TABLE IF NOT EXISTS public.facilities (
     "yearEstablished"        TEXT
 );
 
--- Add rank columns to existing tables (idempotent for re-runs)
+-- Add rank/shift columns to existing tables (idempotent for re-runs)
 ALTER TABLE public.desert_scores ADD COLUMN IF NOT EXISTS raw_rank INT;
 ALTER TABLE public.desert_scores ADD COLUMN IF NOT EXISTS adjusted_rank INT;
+ALTER TABLE public.desert_scores ADD COLUMN IF NOT EXISTS rank_shift INT;
 
 -- Indexes for app query performance
 CREATE INDEX IF NOT EXISTS idx_desert_scores_cap
@@ -166,6 +168,8 @@ desert_scores["adjusted_rank"] = (
     desert_scores.groupby("capability")["adjusted_desert_score"]
     .rank(ascending=False, method="min").astype(int)
 )
+# rank_shift > 0: district became MORE underserved after phantom removal (phantoms were hiding it)
+desert_scores["rank_shift"] = desert_scores["raw_rank"] - desert_scores["adjusted_rank"]
 
 # Guard against repopulating public.tile_layers from a partial gold table:
 # _write_table TRUNCATEs first, so an adjusted-only set would wipe the raw tiles

@@ -280,13 +280,23 @@ for cap in CAPABILITIES:
 desert_scores = pd.concat(score_rows, ignore_index=True)
 print(f"desert_scores: {len(desert_scores):,} rows across {len(CAPABILITIES)} capabilities")
 
-# Top 5 rank shifts for maternity
-mat = desert_scores[desert_scores["capability"] == "maternity"].copy()
-mat["raw_rank"] = mat["raw_desert_score"].rank(ascending=False, method="min").astype(int)
-mat["adj_rank"] = mat["adjusted_desert_score"].rank(ascending=False, method="min").astype(int)
-mat["rank_shift"] = mat["adj_rank"] - mat["raw_rank"]
-top_shifts = mat.nlargest(5, "rank_shift")[["district_name", "state_name", "raw_rank", "adj_rank", "rank_shift"]]
-print("\nTop 5 district rank shifts (maternity, adjusted − raw):")
+# Precompute per-capability ranks and rank shift for tile markers + lakebase write
+desert_scores["raw_rank"] = (
+    desert_scores.groupby("capability")["raw_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
+desert_scores["adjusted_rank"] = (
+    desert_scores.groupby("capability")["adjusted_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
+# rank_shift > 0: district became MORE underserved after phantom removal (phantoms were hiding it)
+desert_scores["rank_shift"] = desert_scores["raw_rank"] - desert_scores["adjusted_rank"]
+
+top_shifts = (
+    desert_scores[desert_scores["capability"] == "maternity"]
+    .nlargest(5, "rank_shift")[["district_name", "state_name", "raw_rank", "adjusted_rank", "rank_shift"]]
+)
+print("\nTop 5 district rank shifts (maternity, raw_rank − adjusted_rank):")
 print(top_shifts.to_string(index=False))
 
 # COMMAND ----------
@@ -301,8 +311,12 @@ def build_choropleth(
 ) -> str:
     from shapely.geometry import box as shapely_box
 
+    merge_cols = ["district_name", "district_id", score_col]
+    if "rank_shift" in scores_df.columns:
+        merge_cols += ["rank_shift", "phantom_count"]
+
     merged = districts_gdf.merge(
-        scores_df[["district_name", "district_id", score_col]],
+        scores_df[merge_cols],
         left_on="district",
         right_on="district_name",
         how="left",
@@ -334,9 +348,39 @@ def build_choropleth(
 
     folium.LayerControl().add_to(m)
 
-    # Inject Leaflet click + focus handlers.
-    # On click: highlights feature, zooms map, postMessages district_id to React parent.
-    # On inbound 'phantom-census-focus-district' message: zooms + highlights from table click.
+    # Orange circle markers on districts most exposed by phantom removal.
+    # rank_shift = raw_rank - adjusted_rank; higher = district jumped up the "underserved" list.
+    if "rank_shift" in merged.columns:
+        shift_col = merged["rank_shift"].fillna(0)
+        threshold = max(15, int(shift_col.quantile(0.80)))
+        movers = merged[shift_col >= threshold].nlargest(30, "rank_shift")
+        for _, row in movers.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+            centroid = geom.centroid
+            shift = int(row["rank_shift"])
+            phantoms = int(row.get("phantom_count", 0))
+            radius = max(5, min(16, shift // 10))
+            folium.CircleMarker(
+                location=[centroid.y, centroid.x],
+                radius=radius,
+                color="#9a3412",
+                weight=1.5,
+                fill=True,
+                fill_color="#f97316",
+                fill_opacity=0.75,
+                tooltip=(
+                    f"<b>{row['district_name']}</b><br>"
+                    f"+{shift} rank positions exposed<br>"
+                    f"{phantoms} phantoms removed"
+                ),
+            ).add_to(m)
+
+    # Inject Leaflet click + focus + hover handlers.
+    # On click: highlight + zoom + postMessage district_id to React parent.
+    # On inbound 'phantom-census-focus-district': zoom + highlight from table selection.
+    # hovered tracks the last mouseover layer to self-heal stuck hover styles.
     m.get_root().html.add_child(folium.Element("""
 <script>
 (function waitForMap() {
@@ -344,7 +388,7 @@ def build_choropleth(
         return k.startsWith('map_') && window[k] && window[k]._layers;
     });
     if (!keys.length) { setTimeout(waitForMap, 150); return; }
-    var m = window[keys[0]], layerMap = {}, active = null;
+    var m = window[keys[0]], layerMap = {}, active = null, hovered = null;
 
     function hi(fl) {
         if (active) m.resetStyle(active);
@@ -369,10 +413,13 @@ def build_choropleth(
                 }, '*');
             });
             fl.on('mouseover', function(e) {
+                if (hovered && hovered !== fl && hovered !== active) m.resetStyle(hovered);
+                hovered = fl;
                 if (fl !== active)
                     e.target.setStyle({fillOpacity: 0.2, weight: 1, color: '#444'});
             });
             fl.on('mouseout', function(e) {
+                if (hovered === fl) hovered = null;
                 if (fl !== active) m.resetStyle(e.target);
             });
         });
@@ -398,23 +445,21 @@ tile_rows: list[dict] = []
 
 for cap in CAPABILITIES:
     cap_scores = desert_scores[desert_scores["capability"] == cap]
-
-    for layer_type, score_col, label in [
-        ("raw",      "raw_desert_score",      f"{cap.title()} desert — raw"),
-        ("adjusted", "adjusted_desert_score",  f"{cap.title()} desert — phantom-adjusted"),
-    ]:
-        try:
-            html = build_choropleth(districts, cap_scores, score_col, label)
-            tile_rows.append({
-                "capability": cap,
-                "layer_type": layer_type,
-                "html": html,
-                "rendered_at": ran_at,
-            })
-            print(f"  tile {cap}/{layer_type}: {len(html):,} chars")
-        except Exception as exc:
-            print(f"  WARN: tile {cap}/{layer_type} failed — {exc}")
-            print(traceback.format_exc())
+    try:
+        html = build_choropleth(
+            districts, cap_scores,
+            "adjusted_desert_score",
+            f"{cap.title()} desert — phantom adjusted",
+        )
+        tile_rows.append({
+            "capability": cap,
+            "layer_type": "adjusted",
+            "html": html,
+            "rendered_at": ran_at,
+        })
+        print(f"  tile {cap}/adjusted: {len(html):,} chars")
+    except Exception as exc:
+        print(f"  WARN: tile {cap}/adjusted failed — {exc}")
 
 tiles_df = pd.DataFrame(tile_rows)
 print(f"\ntile_layers: {len(tiles_df)} tiles generated")
