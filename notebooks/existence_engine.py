@@ -462,7 +462,7 @@ print("DDL applied.")
 
 
 def _write_table(df: pd.DataFrame, table: str) -> None:
-    clean = df.where(pd.notnull(df), other=None)
+    clean = _strip_null_bytes(df.copy()).where(pd.notnull(df), other=None)
     cols  = list(clean.columns)
     col_list = ", ".join(f'"{c}"' for c in cols)
     cur.execute(f'TRUNCATE TABLE public."{table}"')
