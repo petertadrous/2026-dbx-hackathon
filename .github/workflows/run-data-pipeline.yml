@@ -13,6 +13,16 @@ name: Run data pipeline (engine + Lakebase load)
 
 on:
   workflow_dispatch: {}
+  # Also trigger when this workflow file itself changes. workflow_dispatch
+  # alone won't trigger from a non-default branch (GH only exposes the
+  # "Run workflow" button for workflows present on the default branch).
+  # Using a tight path filter lets us kick a run by committing to this
+  # workflow file without firing on every push.
+  push:
+    branches:
+      - updated-specs
+    paths:
+      - '.github/workflows/run-data-pipeline.yml'
 
 concurrency:
   group: run-data-pipeline-${{ github.ref }}
