@@ -388,7 +388,7 @@ def build_choropleth(
         return k.startsWith('map_') && window[k] && window[k]._layers;
     });
     if (!keys.length) { setTimeout(waitForMap, 150); return; }
-    var m = window[keys[0]], layerMap = {}, active = null, hovered = null, gjLayer = null;
+    var m = window[keys[0]], layerMap = {}, active = null, gjLayer = null;
 
     function hi(fl) {
         if (active && gjLayer) gjLayer.resetStyle(active);
@@ -412,16 +412,6 @@ def build_choropleth(
                     districtId: p.district_id || null,
                     districtName: p.district || null
                 }, '*');
-            });
-            fl.on('mouseover', function(e) {
-                if (hovered && hovered !== fl && hovered !== active) gjLayer.resetStyle(hovered);
-                hovered = fl;
-                if (fl !== active)
-                    e.target.setStyle({fillOpacity: 0.2, weight: 1, color: '#444'});
-            });
-            fl.on('mouseout', function(e) {
-                if (hovered === fl) hovered = null;
-                if (fl !== active) gjLayer.resetStyle(e.target);
             });
         });
     });
