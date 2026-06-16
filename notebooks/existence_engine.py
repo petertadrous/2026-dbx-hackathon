@@ -456,8 +456,10 @@ tiles_df = pd.DataFrame(tile_rows)
 print(f"\ntile_layers: {len(tiles_df)} tiles generated")
 
 # Fail the batch rather than write a partial tile_layers set: every capability
-# must have both a raw and an adjusted tile (issue #5 — adjusted-only regression).
-validate_tile_layers(tiles_df, CAPABILITIES)
+# must have an adjusted tile (the React UI shows only the phantom-adjusted
+# choropleth with the rank-shift CircleMarker overlay — the raw tile was
+# retired with the Raw/Adjusted toggle).
+validate_tile_layers(tiles_df, CAPABILITIES, layer_types=("adjusted",))
 
 # COMMAND ----------
 # ── 9. Write gold Delta tables to Unity Catalog ───────────────────────────────
