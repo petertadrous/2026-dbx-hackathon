@@ -1,7 +1,7 @@
 # Databricks notebook source
-# Run on DBR 14.3 ML (includes geopandas system libs).
-# Reads bronze UC tables → runs the 5-signal existence engine → writes gold Delta tables.
-# Gold tables are then synced to Lakebase via `databricks postgres create-synced-table`.
+# Runs on Databricks serverless compute (Free Edition).
+# Reads bronze UC tables → runs the 5-signal existence engine → writes gold Delta tables
+# and pushes all results directly to Lakebase Postgres via psycopg2.
 
 # COMMAND ----------
 
