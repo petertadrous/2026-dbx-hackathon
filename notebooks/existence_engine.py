@@ -388,16 +388,17 @@ def build_choropleth(
         return k.startsWith('map_') && window[k] && window[k]._layers;
     });
     if (!keys.length) { setTimeout(waitForMap, 150); return; }
-    var m = window[keys[0]], layerMap = {}, active = null, hovered = null;
+    var m = window[keys[0]], layerMap = {}, active = null, hovered = null, gjLayer = null;
 
     function hi(fl) {
-        if (active) m.resetStyle(active);
+        if (active && gjLayer) gjLayer.resetStyle(active);
         fl.setStyle({fillOpacity: 0.4, weight: 2, color: '#111'});
         active = fl;
     }
 
     m.eachLayer(function(l) {
         if (!l.eachLayer) return;
+        gjLayer = l;
         l.eachLayer(function(fl) {
             if (!fl.feature) return;
             var did = fl.feature.properties.district_id;
@@ -413,14 +414,14 @@ def build_choropleth(
                 }, '*');
             });
             fl.on('mouseover', function(e) {
-                if (hovered && hovered !== fl && hovered !== active) m.resetStyle(hovered);
+                if (hovered && hovered !== fl && hovered !== active) gjLayer.resetStyle(hovered);
                 hovered = fl;
                 if (fl !== active)
                     e.target.setStyle({fillOpacity: 0.2, weight: 1, color: '#444'});
             });
             fl.on('mouseout', function(e) {
                 if (hovered === fl) hovered = null;
-                if (fl !== active) m.resetStyle(e.target);
+                if (fl !== active) gjLayer.resetStyle(e.target);
             });
         });
     });
