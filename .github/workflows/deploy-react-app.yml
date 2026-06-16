@@ -1,0 +1,74 @@
+name: Deploy phantom-census-app to my workspace
+
+# Deploys the React/TS Databricks App from phantom-census-app/ to the workspace
+# whose host + credentials are stored in repository secrets. Follows the same
+# OAuth M2M auth pattern as the prior databricks-deploy.yml workflow.
+#
+# The bundle file (phantom-census-app/databricks.yml) hard-codes the workspace
+# host that Kai's branch was built against. We override that host with
+# secrets.DATABRICKS_HOST via sed before deploy so the bundle targets the
+# workspace this repo's secrets point at.
+#
+# Required repository secrets:
+#   DATABRICKS_HOST           — full URL, e.g. https://dbc-XXXX.cloud.databricks.com
+#   DATABRICKS_CLIENT_ID      — service principal client id
+#   DATABRICKS_CLIENT_SECRET  — service principal client secret
+
+on:
+  push:
+    branches:
+      - updated-specs
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-react-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+
+    defaults:
+      run:
+        working-directory: phantom-census-app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: phantom-census-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (server + client)
+        run: npm run build
+
+      - name: Override bundle workspace host with my workspace
+        # The committed bundle file hard-codes Kai's host. Replace the host
+        # line with the host from secrets so the bundle deploys to my workspace.
+        run: sed -i -e "s|host: https://.*|host: ${DATABRICKS_HOST}|" databricks.yml
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validate bundle
+        run: databricks bundle validate
+
+      - name: Deploy bundle
+        run: databricks bundle deploy
+
+      - name: Run app (apply config + restart)
+        run: databricks bundle run app
