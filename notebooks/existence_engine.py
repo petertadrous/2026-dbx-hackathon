@@ -340,9 +340,16 @@ GOLD_SCHEMA = "phantom_census"
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GOLD_CATALOG}.{GOLD_SCHEMA}")
 
 
+def _strip_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].apply(lambda v: v.replace("\x00", "") if isinstance(v, str) else v)
+    return df
+
+
 def write_gold(df: pd.DataFrame, table: str) -> None:
     fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.{table}"
     import pyarrow as pa
+    df = _strip_null_bytes(df.copy())
     arrow_table = pa.Table.from_pandas(df).combine_chunks()
     sdf = spark.createDataFrame(arrow_table.to_pandas())
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(fqn)
