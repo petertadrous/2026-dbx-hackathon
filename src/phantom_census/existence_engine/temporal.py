@@ -16,8 +16,7 @@ _HIGH_ACUITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-MIN_PLAUSIBLE_YEAR = 1900
-HIGH_ACUITY_FOUNDING_CEILING = 2020
+MIN_PLAUSIBLE_YEAR = 1600
 
 
 def _join(field: object) -> str:
@@ -54,6 +53,7 @@ def claims_high_acuity(capability: object, description: object) -> str | None:
 
 # @spec EE-TEMP-001..005
 def run_temporal_test(facilities: pd.DataFrame, current_year: int) -> pd.DataFrame:
+    high_acuity_ceiling = current_year - 5
     rows: list[dict] = []
     for _, fac in facilities.iterrows():
         fac_id = fac["facility_id"]
@@ -70,14 +70,14 @@ def run_temporal_test(facilities: pd.DataFrame, current_year: int) -> pd.DataFra
         if year < MIN_PLAUSIBLE_YEAR:
             rows.append(_row(fac_id, TestResult.FAIL,
                              {"year": year, "matched_term": None,
-                              "reason": "before-1900"}))
+                              "reason": f"before-{MIN_PLAUSIBLE_YEAR}"}))
             continue
 
         matched = claims_high_acuity(fac.get("capability"), fac.get("description"))
-        if year > HIGH_ACUITY_FOUNDING_CEILING and matched is not None:
+        if year > high_acuity_ceiling and matched is not None:
             rows.append(_row(fac_id, TestResult.FAIL,
                              {"year": year, "matched_term": matched,
-                              "reason": "post-2020-high-acuity"}))
+                              "reason": f"post-{high_acuity_ceiling}-high-acuity"}))
             continue
 
         rows.append(_row(fac_id, TestResult.PASS, {"year": year, "matched_term": None}))

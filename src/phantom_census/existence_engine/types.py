@@ -34,4 +34,4 @@ class TestName(str, Enum):
     DEFENDER_RESCUE = "defender-rescue"
 
 
-VETO_TESTS = frozenset({TestName.PIN_LOOKUP, TestName.SPATIAL})
+VETO_TESTS = frozenset({TestName.SPATIAL})

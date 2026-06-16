@@ -52,12 +52,12 @@ def run_engine(inputs: EngineInputs, ran_at: datetime | None = None) -> EngineOu
 
     current_year = inputs.current_year or ran_at.year
 
-    pin_centroids = pin_lookup.build_pin_centroids(inputs.india_post)
+    pin_post_offices = pin_lookup.build_pin_post_offices(inputs.india_post)
     facilities_with_district = spatial.assign_districts(inputs.facilities, inputs.districts)
 
     signatures: dict[str, MinHash] = {}
 
-    t1 = pin_lookup.run_pin_test(inputs.facilities, pin_centroids)
+    t1 = pin_lookup.run_pin_test(inputs.facilities, pin_post_offices)
     t2 = run_minhash_test(inputs.facilities, signatures_out=signatures)
     t3 = spatial.run_spatial_test(inputs.facilities, inputs.districts, inputs.india_post)
     t4 = nfhs.run_nfhs_test(facilities_with_district, inputs.nfhs, district_to_state)
