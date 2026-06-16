@@ -142,6 +142,53 @@ The planner's prior-quarter ₹ allocation per district. Read by the Budget Real
 
 Composite PK on `(district_id, capability, quarter)`. Read-only from the app's perspective during the demo (the *recommended* re-allocation is computed in-process from `desert_scores` + this table; the recommendation is exported to CSV, not written back to this table). Multi-quarter data lets a future enhancement compare allocations over time without schema change.
 
+## Platform Sync
+
+The existence engine runs offline as a Databricks notebook against the
+Virtue Foundation bronze tables, computes all six tests and the dual-verdict
+outputs, and writes gold Delta tables to `workspace.phantom_census.*`. The
+gold tables are then mirrored into Lakebase as **synced tables** in the
+`phantom_census_lakebase.public.*` schema via the Autoscaling
+`databricks postgres create-synced-table` API.
+
+**Why synced tables, not the engine writer:** the engine writer in
+`lakebase/writer.py` is the path used by per-batch incremental updates and
+by integration tests against a local Postgres. The synced-tables pipeline
+is the platform-managed bulk-mirror used to seed Lakebase from gold Delta
+on a fresh deploy without round-tripping through the writer. Both paths
+target the same Lakebase schema; the synced-tables snapshot is the
+authoritative read source the Streamlit app sees.
+
+**Gold-table set (LP-SYNC-001):**
+
+| Gold table | Primary key | Read by |
+|---|---|---|
+| `facilities` | `facility_id` | map_view, side_panel, audit_view |
+| `phantom_verdicts` | `facility_id` | every view |
+| `facility_existence_tests` | `(facility_id, test_name, ran_at)` | side_panel evidence expand |
+| `desert_scores` | `(district_id, capability)` | map_view, budget_view |
+| `description_embeddings` | `(facility_id, snapshot_id)` | embedding-drift Test 6 + EE-AI-007 |
+| `facility_capabilities` | `(facility_id, capability)` | desert-scoring multi-cap recompute |
+| `budget_allocations` | `(district_id, capability, quarter)` | budget_view |
+
+**Sync mode (LP-SYNC-003):** `SNAPSHOT`. Re-running the notebook + the
+setup script refreshes the snapshot — no CDF dependency. `TRIGGERED` mode
+is a future option once the gold tables enable CDF.
+
+**Cuts (LP-SYNC-004):** `cache.tile_layers` is not synced — the table was
+deleted per LP-INIT-004's inversion. `cache.claim_minhash` is not synced
+either — the engine's `writer.py` is the canonical write path for MinHash
+signatures, used by integration tests against a local Postgres; in the
+deployed app the engine notebook itself uses `writer.py` against the
+Lakebase synced-table endpoint for the minhash cache.
+
+**Grants (LP-SYNC-005):** the synced-tables pipeline creates schemas
+owned by the project owner (`databricks_superuser`). The app's service
+principal needs an explicit `GRANT USAGE` on the `public` schema plus
+`GRANT SELECT` on all current AND future tables (via `ALTER DEFAULT
+PRIVILEGES`) so subsequent sync refreshes are readable without
+re-granting.
+
 ## Connection Pattern
 
 The Streamlit app connects to Lakebase via SQLAlchemy using the Databricks Postgres-compatible endpoint. Read queries use a read-only connection pool; write operations (overrides, scenario saves) use a write connection with explicit transaction management.
