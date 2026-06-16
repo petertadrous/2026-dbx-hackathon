@@ -21,6 +21,7 @@ import json
 import math
 import re
 import tempfile
+import traceback
 import warnings
 from datetime import datetime, timezone
 
@@ -38,6 +39,7 @@ from phantom_census.existence_engine.data_loading import (
 )
 from phantom_census.existence_engine.pipeline import EngineInputs, run_engine
 from phantom_census.existence_engine.spatial import assign_districts
+from phantom_census.desert_scoring.tiles import validate_tile_layers
 
 # COMMAND ----------
 # ── 1. Read bronze UC tables ──────────────────────────────────────────────────
@@ -412,9 +414,14 @@ for cap in CAPABILITIES:
             print(f"  tile {cap}/{layer_type}: {len(html):,} chars")
         except Exception as exc:
             print(f"  WARN: tile {cap}/{layer_type} failed — {exc}")
+            print(traceback.format_exc())
 
 tiles_df = pd.DataFrame(tile_rows)
 print(f"\ntile_layers: {len(tiles_df)} tiles generated")
+
+# Fail the batch rather than write a partial tile_layers set: every capability
+# must have both a raw and an adjusted tile (issue #5 — adjusted-only regression).
+validate_tile_layers(tiles_df, CAPABILITIES)
 
 # COMMAND ----------
 # ── 9. Write gold Delta tables to Unity Catalog ───────────────────────────────

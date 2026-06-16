@@ -18,6 +18,8 @@ from databricks.sdk import WorkspaceClient
 import psycopg2
 import psycopg2.extras
 
+from phantom_census.desert_scoring.tiles import validate_tile_layers
+
 GOLD_CATALOG  = "workspace"
 GOLD_SCHEMA   = "phantom_census"
 LAKEBASE_EP   = "projects/phantom-census/branches/production/endpoints/primary"
@@ -164,6 +166,16 @@ desert_scores["adjusted_rank"] = (
     desert_scores.groupby("capability")["adjusted_desert_score"]
     .rank(ascending=False, method="min").astype(int)
 )
+
+# Guard against repopulating public.tile_layers from a partial gold table:
+# _write_table TRUNCATEs first, so an adjusted-only set would wipe the raw tiles
+# the app needs (issue #5). Validate every capability has both layers first.
+tile_counts = (
+    tiles_df.groupby(["capability", "layer_type"]).size().reset_index(name="n")
+)
+print("tile_layers by (capability, layer_type):")
+print(tile_counts.to_string(index=False))
+validate_tile_layers(tiles_df, sorted(tiles_df["capability"].unique()))
 
 print("Writing to Lakebase...")
 _write_table(verdicts,        "phantom_verdicts")

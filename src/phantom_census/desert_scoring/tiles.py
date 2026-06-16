@@ -1,12 +1,12 @@
 """Folium tile pre-rendering + ranking + counter helpers.
 
-@spec DS-TILE-001, DS-TILE-002, DS-TILE-003, DS-TILE-004,
+@spec DS-TILE-001, DS-TILE-002, DS-TILE-003, DS-TILE-004, DS-TILE-005,
       DS-RANK-001, DS-RANK-002, DS-RANK-003,
       DS-CTR-001, DS-CTR-002, DS-CTR-003
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Iterable, Literal
 
 import folium
 import geopandas as gpd
@@ -85,3 +85,52 @@ def phantom_counter(scores: pd.DataFrame) -> int:
 def token_usage_indicator() -> str:
     """Constant indicator surfaced in the planner header."""
     return "token_usage: 0"
+
+
+# @spec DS-TILE-005
+def validate_tile_layers(
+    tiles_df: pd.DataFrame,
+    capabilities: Iterable[str],
+    *,
+    layer_types: tuple[str, ...] = ("raw", "adjusted"),
+    min_html_len: int = 50_000,
+) -> pd.DataFrame:
+    """Fail loudly unless every (capability, layer_type) has one usable tile.
+
+    Guards the batch tile-render and Lakebase-load paths so a stale or partial
+    notebook can never silently ship an incomplete `tile_layers` set (e.g. the
+    adjusted-only regression from issue #5). Returns `tiles_df` unchanged on
+    success so callers can chain it before a write.
+
+    A tile is "usable" when its HTML is present, at least `min_html_len` chars,
+    and contains a Folium/Leaflet structural marker — a size floor alone is not
+    enough to prove the choropleth actually rendered.
+    """
+    expected = {(cap, lt) for cap in capabilities for lt in layer_types}
+
+    present_pairs = set(
+        map(tuple, tiles_df[["capability", "layer_type"]].drop_duplicates().to_numpy())
+    )
+    missing = sorted(expected - present_pairs)
+    if missing:
+        raise RuntimeError(
+            f"Missing tile layers for {len(missing)} (capability, layer_type) "
+            f"pair(s): {missing}"
+        )
+
+    html = tiles_df["html"].fillna("")
+    too_small = html.str.len() < min_html_len
+    no_marker = ~html.str.contains("leaflet", case=False) & ~html.str.contains(
+        "<html", case=False
+    )
+    degenerate = tiles_df[too_small | no_marker]
+    if not degenerate.empty:
+        bad = sorted(
+            map(tuple, degenerate[["capability", "layer_type"]].to_numpy())
+        )
+        raise RuntimeError(
+            f"Degenerate tile HTML (empty, < {min_html_len} chars, or missing "
+            f"Leaflet marker) for: {bad}"
+        )
+
+    return tiles_df
