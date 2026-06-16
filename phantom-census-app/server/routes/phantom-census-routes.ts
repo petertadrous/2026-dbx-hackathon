@@ -82,77 +82,26 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
 
   appkit.server.extend((app) => {
 
-    // ── Bootstrap: summary + district scores + tile layers + scenarios ─────────
-    app.get('/api/planner/bootstrap', async (req, res) => {
+    // ── Summary: fast — stats + scenarios only (no expensive CTE) ─────────────
+    app.get('/api/planner/summary', async (req, res) => {
       const capability = getCapability(req.query.capability);
       const plannerId = getPlannerId(req.query.plannerId);
 
       try {
-        const [summary, scores, tiles, scenarios] = await Promise.all([
-
-          // Aggregate from pre-computed desert_scores (synced from UC gold table).
-          // override_count comes from team.planner_overrides.
+        const [summary, scenarios] = await Promise.all([
           appkit.lakebase.query(
             `
             SELECT
-              COALESCE(SUM(ds.total_count), 0)::INT   AS total_facilities,
-              COALESCE(SUM(ds.phantom_count), 0)::INT  AS phantom_count,
+              COALESCE(SUM(ds.total_count), 0)::INT    AS total_facilities,
+              COALESCE(SUM(ds.phantom_count), 0)::INT   AS phantom_count,
               COALESCE(SUM(ds.contested_count), 0)::INT AS contested_count,
               (SELECT COUNT(DISTINCT facility_id)::INT
-               FROM team.planner_overrides)              AS override_count
+               FROM team.planner_overrides)             AS override_count
             FROM public.desert_scores ds
             WHERE ds.capability = $1
             `,
             [capability],
           ),
-
-          // District scores.  Effective phantom_count folds in planner overrides
-          // so the sidebar stays live without needing to UPDATE the synced table.
-          appkit.lakebase.query(
-            `
-            WITH overrides AS (
-              SELECT DISTINCT ON (facility_id) facility_id, override_type
-              FROM team.planner_overrides
-              ORDER BY facility_id, overridden_at DESC
-            ),
-            verdict_adjustments AS (
-              SELECT
-                pv.district_id,
-                COUNT(*) FILTER (
-                  WHERE COALESCE(o.override_type, pv.verdict) = 'phantom'
-                    OR (o.override_type IS NULL AND pv.verdict = 'phantom')
-                )::INT  AS effective_phantom_count
-              FROM public.phantom_verdicts pv
-              LEFT JOIN overrides o ON o.facility_id = pv.facility_id
-              WHERE pv.district_id IS NOT NULL
-              GROUP BY pv.district_id
-            )
-            SELECT
-              ds.district_id,
-              ds.district_name,
-              ds.state_name,
-              ds.raw_desert_score,
-              ds.adjusted_desert_score,
-              ds.verified_facility_count,
-              COALESCE(va.effective_phantom_count, ds.phantom_count) AS phantom_count,
-              ds.burden_imputed,
-              RANK() OVER (ORDER BY ds.raw_desert_score DESC)::INT      AS raw_rank,
-              RANK() OVER (ORDER BY ds.adjusted_desert_score DESC)::INT AS adjusted_rank
-            FROM public.desert_scores ds
-            LEFT JOIN verdict_adjustments va ON va.district_id = ds.district_id
-            WHERE ds.capability = $1
-            ORDER BY ds.adjusted_desert_score DESC, ds.district_name
-            LIMIT 200
-            `,
-            [capability],
-          ),
-
-          // Pre-rendered Folium HTML tiles (synced from UC gold table).
-          appkit.lakebase.query(
-            `SELECT layer_type, html, rendered_at FROM public.tile_layers WHERE capability = $1`,
-            [capability],
-          ),
-
           appkit.lakebase.query(
             `
             SELECT scenario_id, scenario_name, capability, region_filter, planner_notes, saved_at
@@ -167,19 +116,63 @@ export async function setupPhantomCensusRoutes(appkit: AppKitWithLakebase) {
 
         res.json({
           capability,
-          summary: summary.rows[0] ?? {
-            total_facilities: 0,
-            phantom_count: 0,
-            contested_count: 0,
-            override_count: 0,
-          },
-          scores: scores.rows,
-          tileLayers: tiles.rows,
+          summary: summary.rows[0] ?? { total_facilities: 0, phantom_count: 0, contested_count: 0, override_count: 0 },
           scenarios: scenarios.rows,
         });
       } catch (err) {
-        console.error('Failed to load planner bootstrap:', err);
-        res.status(500).json({ error: 'Failed to load planner data' });
+        console.error('Failed to load planner summary:', err);
+        res.status(500).json({ error: 'Failed to load summary' });
+      }
+    });
+
+    // ── Tiles: pre-rendered Folium HTML (loaded independently for parallel fetch)
+    app.get('/api/planner/tiles', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+
+      try {
+        const tiles = await appkit.lakebase.query(
+          `SELECT layer_type, html, rendered_at FROM public.tile_layers WHERE capability = $1`,
+          [capability],
+        );
+        res.json({ tileLayers: tiles.rows });
+      } catch (err) {
+        console.error('Failed to load tile layers:', err);
+        res.status(500).json({ error: 'Failed to load tiles' });
+      }
+    });
+
+    // ── Bootstrap: district scores only — simple SELECT on precomputed ranks ───
+    app.get('/api/planner/bootstrap', async (req, res) => {
+      const capability = getCapability(req.query.capability);
+
+      try {
+        const scores = await appkit.lakebase.query(
+          `
+          SELECT
+            district_id,
+            district_name,
+            state_name,
+            raw_desert_score,
+            adjusted_desert_score,
+            verified_facility_count,
+            phantom_count,
+            contested_count,
+            total_count,
+            burden_imputed,
+            raw_rank,
+            adjusted_rank
+          FROM public.desert_scores
+          WHERE capability = $1
+          ORDER BY adjusted_desert_score DESC, district_name
+          LIMIT 200
+          `,
+          [capability],
+        );
+
+        res.json({ capability, scores: scores.rows });
+      } catch (err) {
+        console.error('Failed to load district scores:', err);
+        res.status(500).json({ error: 'Failed to load district scores' });
       }
     });
 

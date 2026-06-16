@@ -300,7 +300,7 @@ def build_choropleth(
     from shapely.geometry import box as shapely_box
 
     merged = districts_gdf.merge(
-        scores_df[["district_name", score_col]],
+        scores_df[["district_name", "district_id", score_col]],
         left_on="district",
         right_on="district_name",
         how="left",
@@ -331,6 +331,64 @@ def build_choropleth(
     ).add_to(m)
 
     folium.LayerControl().add_to(m)
+
+    # Inject Leaflet click + focus handlers.
+    # On click: highlights feature, zooms map, postMessages district_id to React parent.
+    # On inbound 'phantom-census-focus-district' message: zooms + highlights from table click.
+    m.get_root().html.add_child(folium.Element("""
+<script>
+(function waitForMap() {
+    var keys = Object.keys(window).filter(function(k) {
+        return k.startsWith('map_') && window[k] && window[k]._layers;
+    });
+    if (!keys.length) { setTimeout(waitForMap, 150); return; }
+    var m = window[keys[0]], layerMap = {}, active = null;
+
+    function hi(fl) {
+        if (active) m.resetStyle(active);
+        fl.setStyle({fillOpacity: 0.4, weight: 2, color: '#111'});
+        active = fl;
+    }
+
+    m.eachLayer(function(l) {
+        if (!l.eachLayer) return;
+        l.eachLayer(function(fl) {
+            if (!fl.feature) return;
+            var did = fl.feature.properties.district_id;
+            if (did) layerMap[did] = fl;
+            fl.on('click', function() {
+                var p = fl.feature.properties;
+                hi(fl);
+                m.fitBounds(fl.getBounds(), {padding: [30, 30]});
+                window.parent.postMessage({
+                    type: 'phantom-census-district-click',
+                    districtId: p.district_id || null,
+                    districtName: p.district || null
+                }, '*');
+            });
+            fl.on('mouseover', function(e) {
+                if (fl !== active)
+                    e.target.setStyle({fillOpacity: 0.2, weight: 1, color: '#444'});
+            });
+            fl.on('mouseout', function(e) {
+                if (fl !== active) m.resetStyle(e.target);
+            });
+        });
+    });
+
+    window.addEventListener('message', function(e) {
+        if (e.data && e.data.type === 'phantom-census-focus-district') {
+            var fl = layerMap[e.data.districtId];
+            if (fl) { hi(fl); m.fitBounds(fl.getBounds(), {padding: [30, 30]}); }
+        }
+    });
+
+    var c = document.querySelector('.leaflet-container');
+    if (c) c.style.cursor = 'pointer';
+})();
+</script>
+"""))
+
     return m._repr_html_()
 
 

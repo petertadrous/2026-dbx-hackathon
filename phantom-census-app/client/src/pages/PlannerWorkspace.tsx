@@ -9,7 +9,7 @@ import {
   Skeleton,
 } from '@databricks/appkit-ui/react';
 import { Activity, BookmarkPlus, CheckCircle2, Database, FileText, MapPinned, RefreshCw, ShieldAlert, XCircle } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type Capability = 'maternity' | 'icu' | 'emergency' | 'trauma' | 'nicu';
 type ViewMode = 'raw' | 'adjusted';
@@ -49,12 +49,19 @@ interface Scenario {
   saved_at: string;
 }
 
-interface BootstrapResponse {
+interface SummaryResponse {
   capability: Capability;
   summary: Summary;
-  scores: DistrictScore[];
-  tileLayers: TileLayer[];
   scenarios: Scenario[];
+}
+
+interface ScoresResponse {
+  capability: Capability;
+  scores: DistrictScore[];
+}
+
+interface TilesResponse {
+  tileLayers: TileLayer[];
 }
 
 interface PhantomFacility {
@@ -107,38 +114,63 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 export function PlannerWorkspace() {
   const [capability, setCapability] = useState<Capability>('maternity');
   const [viewMode, setViewMode] = useState<ViewMode>('adjusted');
-  const [data, setData] = useState<BootstrapResponse | null>(null);
+
+  // Split into three independent data streams for parallel loading
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [scores, setScores] = useState<DistrictScore[] | null>(null);
+  const [tiles, setTiles] = useState<TileLayer[] | null>(null);
+
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [scoresLoading, setScoresLoading] = useState(true);
+  const [tilesLoading, setTilesLoading] = useState(true);
+  const [districtLoading, setDistrictLoading] = useState(false);
+
   const [selectedDistrictId, setSelectedDistrictId] = useState<string | null>(null);
   const [phantoms, setPhantoms] = useState<PhantomFacility[]>([]);
-  const [reasonNote, setReasonNote] = useState('');
   const [selectedFacilityId, setSelectedFacilityId] = useState<string | null>(null);
   const [facilityTests, setFacilityTests] = useState<TestEvidence[] | null>(null);
+
+  const [reasonNote, setReasonNote] = useState('');
   const [scenarioName, setScenarioName] = useState('');
   const [scenarioNotes, setScenarioNotes] = useState('');
   const [savingScenario, setSavingScenario] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [districtLoading, setDistrictLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+
+  // Phase 1 — fast (~300 ms): summary stats + scenarios
   useEffect(() => {
-    setLoading(true);
+    setSummaryLoading(true);
     setError(null);
-    fetchJson<BootstrapResponse>(`/api/planner/bootstrap?capability=${capability}&plannerId=${plannerId}`)
-      .then((nextData) => {
-        setData(nextData);
-        setSelectedDistrictId(nextData.scores[0]?.district_id ?? null);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load planner data'))
-      .finally(() => setLoading(false));
+    fetchJson<SummaryResponse>(`/api/planner/summary?capability=${capability}&plannerId=${plannerId}`)
+      .then((d) => { setSummary(d.summary); setScenarios(d.scenarios); })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load summary'))
+      .finally(() => setSummaryLoading(false));
   }, [capability]);
 
+  // Phase 2 — medium (~500 ms): district scores (precomputed ranks, simple SELECT)
   useEffect(() => {
-    if (!selectedDistrictId) {
-      setPhantoms([]);
-      return;
-    }
+    setScoresLoading(true);
+    fetchJson<ScoresResponse>(`/api/planner/bootstrap?capability=${capability}`)
+      .then((d) => setScores(d.scores))
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load district scores'))
+      .finally(() => setScoresLoading(false));
+  }, [capability]);
 
+  // Phase 3 — independent: tile HTML (can be large, loads in background)
+  useEffect(() => {
+    setTilesLoading(true);
+    fetchJson<TilesResponse>(`/api/planner/tiles?capability=${capability}`)
+      .then((d) => setTiles(d.tileLayers))
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load map tiles'))
+      .finally(() => setTilesLoading(false));
+  }, [capability]);
+
+  // District phantom list — fetched on demand when district is selected
+  useEffect(() => {
+    if (!selectedDistrictId) { setPhantoms([]); return; }
     setDistrictLoading(true);
     fetchJson<PhantomFacility[]>(
       `/api/planner/districts/${encodeURIComponent(selectedDistrictId)}/phantoms`,
@@ -148,27 +180,54 @@ export function PlannerWorkspace() {
       .finally(() => setDistrictLoading(false));
   }, [capability, selectedDistrictId]);
 
+  // Facility test evidence — fetched on demand
   useEffect(() => {
-    if (!selectedFacilityId) {
-      setFacilityTests(null);
-      return;
-    }
+    if (!selectedFacilityId) { setFacilityTests(null); return; }
     fetchJson<TestEvidence[]>(`/api/planner/facilities/${encodeURIComponent(selectedFacilityId)}/tests`)
       .then(setFacilityTests)
       .catch(() => setFacilityTests([]));
   }, [selectedFacilityId]);
 
+  // Map → React: receive district click from Folium iframe
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'phantom-census-district-click' && event.data.districtId) {
+        setSelectedDistrictId(event.data.districtId as string);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  // React → Map: focus + highlight district when selected from table
+  useEffect(() => {
+    if (!selectedDistrictId) return;
+    const timer = setTimeout(() => {
+      const iframe = mapContainerRef.current?.querySelector('iframe');
+      iframe?.contentWindow?.postMessage(
+        { type: 'phantom-census-focus-district', districtId: selectedDistrictId },
+        '*',
+      );
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [selectedDistrictId]);
+
   const selectedDistrict = useMemo(
-    () => data?.scores.find((score) => score.district_id === selectedDistrictId) ?? data?.scores[0],
-    [data, selectedDistrictId],
+    () => scores?.find((s) => s.district_id === selectedDistrictId) ?? null,
+    [scores, selectedDistrictId],
   );
 
-  const activeTile = data?.tileLayers.find((tile) => tile.layer_type === viewMode);
-  const rankedScores = [...(data?.scores ?? [])].sort((a, b) => {
-    const aScore = viewMode === 'raw' ? a.raw_desert_score : a.adjusted_desert_score;
-    const bScore = viewMode === 'raw' ? b.raw_desert_score : b.adjusted_desert_score;
-    return asNumber(bScore) - asNumber(aScore);
-  });
+  const activeTile = tiles?.find((t) => t.layer_type === viewMode);
+
+  const rankedScores = useMemo(
+    () =>
+      [...(scores ?? [])].sort((a, b) => {
+        const aScore = viewMode === 'raw' ? a.raw_desert_score : a.adjusted_desert_score;
+        const bScore = viewMode === 'raw' ? b.raw_desert_score : b.adjusted_desert_score;
+        return asNumber(bScore) - asNumber(aScore);
+      }),
+    [scores, viewMode],
+  );
 
   const saveScenario = async () => {
     if (!scenarioName.trim()) return;
@@ -187,10 +246,11 @@ export function PlannerWorkspace() {
           plannerId,
         }),
       });
-      const refreshed = await fetchJson<BootstrapResponse>(
-        `/api/planner/bootstrap?capability=${capability}&plannerId=${plannerId}`,
+      // Refresh only scenarios via the fast summary endpoint
+      const refreshed = await fetchJson<SummaryResponse>(
+        `/api/planner/summary?capability=${capability}&plannerId=${plannerId}`,
       );
-      setData(refreshed);
+      setScenarios(refreshed.scenarios);
       setScenarioName('');
       setScenarioNotes('');
     } catch (err) {
@@ -202,28 +262,25 @@ export function PlannerWorkspace() {
 
   const saveOverride = async (overrideType: 'force-real' | 'force-phantom') => {
     if (!selectedFacilityId || !reasonNote.trim()) return;
-
     setSaving(true);
     setError(null);
     try {
       await fetchJson('/api/planner/overrides', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          facilityId: selectedFacilityId,
-          overrideType,
-          reasonNote,
-          plannerId,
-          capability,
-        }),
+        body: JSON.stringify({ facilityId: selectedFacilityId, overrideType, reasonNote, plannerId, capability }),
       });
-
-      const refreshed = await fetchJson<BootstrapResponse>(
-        `/api/planner/bootstrap?capability=${capability}&plannerId=${plannerId}`,
-      );
-      setData(refreshed);
       setReasonNote('');
       setSelectedFacilityId(null);
+      // Re-fetch phantom list for the current district to reflect the override immediately
+      if (selectedDistrictId) {
+        setDistrictLoading(true);
+        fetchJson<PhantomFacility[]>(
+          `/api/planner/districts/${encodeURIComponent(selectedDistrictId)}/phantoms`,
+        )
+          .then(setPhantoms)
+          .finally(() => setDistrictLoading(false));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save override');
     } finally {
@@ -291,44 +348,63 @@ export function PlannerWorkspace() {
         )}
 
         <section className="space-y-4">
+          {/* Summary cards — appear as soon as fast /summary call returns */}
           <div className="grid gap-3 sm:grid-cols-4">
-            <Metric label="Facilities scored" value={formatCount(data?.summary.total_facilities ?? 0)} icon={<Database />} />
-            <Metric label="Phantoms removed" value={formatCount(data?.summary.phantom_count ?? 0)} icon={<ShieldAlert />} />
-            <Metric label="Contested" value={formatCount(data?.summary.contested_count ?? 0)} icon={<Activity />} />
+            <Metric
+              label="Facilities scored"
+              value={summaryLoading ? '…' : formatCount(summary?.total_facilities ?? 0)}
+              icon={<Database />}
+            />
+            <Metric
+              label="Phantoms removed"
+              value={summaryLoading ? '…' : formatCount(summary?.phantom_count ?? 0)}
+              icon={<ShieldAlert />}
+            />
+            <Metric
+              label="Contested"
+              value={summaryLoading ? '…' : formatCount(summary?.contested_count ?? 0)}
+              icon={<Activity />}
+            />
             <Metric label="token_usage" value="0" icon={<RefreshCw />} />
           </div>
 
+          {/* Map — loads independently; shows skeleton until tiles arrive */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>India Healthcare Desert Map</CardTitle>
               <Badge variant="secondary">{viewMode === 'raw' ? 'Raw facility count' : 'Phantom adjusted'}</Badge>
             </CardHeader>
             <CardContent>
-              {loading ? (
+              {tilesLoading ? (
                 <Skeleton className="h-[420px] w-full" />
               ) : activeTile ? (
-                <div className="h-[420px] overflow-hidden rounded-md border" dangerouslySetInnerHTML={{ __html: activeTile.html }} />
+                <div
+                  ref={mapContainerRef}
+                  className="h-[420px] overflow-hidden rounded-md border"
+                  dangerouslySetInnerHTML={{ __html: activeTile.html }}
+                />
               ) : (
                 <EmptyMap />
               )}
             </CardContent>
           </Card>
 
+          {/* District ranking table — loads independently */}
           <Card>
             <CardHeader>
               <CardTitle>District Ranking</CardTitle>
             </CardHeader>
             <CardContent>
-              {loading ? (
+              {scoresLoading ? (
                 <div className="space-y-2">
-                  {Array.from({ length: 5 }, (_, index) => (
-                    <Skeleton key={index} className="h-10 w-full" />
+                  {Array.from({ length: 5 }, (_, i) => (
+                    <Skeleton key={i} className="h-10 w-full" />
                   ))}
                 </div>
               ) : rankedScores.length === 0 ? (
                 <EmptyState
                   title="No desert scores loaded"
-                  detail="Run the offline pipeline and load operational.desert_scores before using the planner workflow."
+                  detail="Run the offline pipeline and load public.desert_scores before using the planner workflow."
                 />
               ) : (
                 <div className="overflow-auto">
@@ -349,7 +425,9 @@ export function PlannerWorkspace() {
                         return (
                           <tr
                             key={score.district_id}
-                            className="cursor-pointer border-b hover:bg-muted/50"
+                            className={`cursor-pointer border-b hover:bg-muted/50 ${
+                              score.district_id === selectedDistrictId ? 'bg-primary/5 font-medium' : ''
+                            }`}
                             onClick={() => setSelectedDistrictId(score.district_id)}
                           >
                             <td className="py-2 pr-3 font-medium">{score.district_name}</td>
@@ -400,9 +478,11 @@ export function PlannerWorkspace() {
                           <button
                             type="button"
                             key={facility.facility_id}
-                            onClick={() => setSelectedFacilityId(
-                              selectedFacilityId === facility.facility_id ? null : facility.facility_id
-                            )}
+                            onClick={() =>
+                              setSelectedFacilityId(
+                                selectedFacilityId === facility.facility_id ? null : facility.facility_id,
+                              )
+                            }
                             className={`w-full rounded-md border p-3 text-left text-sm transition-colors ${
                               selectedFacilityId === facility.facility_id
                                 ? 'border-primary bg-primary/5'
@@ -411,7 +491,8 @@ export function PlannerWorkspace() {
                           >
                             <div className="font-medium">{facility.facility_name ?? facility.facility_id}</div>
                             <div className="text-muted-foreground">
-                              {facility.primary_failed_test ?? 'evidence pending'}{facility.override_id ? ' · overridden' : ''}
+                              {facility.primary_failed_test ?? 'evidence pending'}
+                              {facility.override_id ? ' · overridden' : ''}
                             </div>
                           </button>
                         ))}
@@ -420,7 +501,10 @@ export function PlannerWorkspace() {
                   </div>
                 </>
               ) : (
-                <EmptyState title="No district selected" detail="Load desert scores to inspect district evidence." />
+                <EmptyState
+                  title="No district selected"
+                  detail="Click a district on the map or in the ranking table to explore phantom evidence."
+                />
               )}
             </CardContent>
           </Card>
@@ -443,13 +527,20 @@ export function PlannerWorkspace() {
                     {facilityTests.map((t) => (
                       <div key={t.test_name} className="flex items-center justify-between rounded border px-3 py-2 text-xs">
                         <span className="font-mono">{t.test_name}</span>
-                        <span className={`flex items-center gap-1 font-medium ${
-                          t.result === 'fail' ? 'text-destructive' :
-                          t.result === 'pass' ? 'text-green-600 dark:text-green-400' :
-                          'text-muted-foreground'
-                        }`}>
-                          {t.result === 'fail' ? <XCircle className="h-3 w-3" /> :
-                           t.result === 'pass' ? <CheckCircle2 className="h-3 w-3" /> : null}
+                        <span
+                          className={`flex items-center gap-1 font-medium ${
+                            t.result === 'fail'
+                              ? 'text-destructive'
+                              : t.result === 'pass'
+                                ? 'text-green-600 dark:text-green-400'
+                                : 'text-muted-foreground'
+                          }`}
+                        >
+                          {t.result === 'fail' ? (
+                            <XCircle className="h-3 w-3" />
+                          ) : t.result === 'pass' ? (
+                            <CheckCircle2 className="h-3 w-3" />
+                          ) : null}
                           {t.result}
                         </span>
                       </div>
@@ -504,12 +595,14 @@ export function PlannerWorkspace() {
               <CardTitle>Saved scenarios</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {data?.scenarios.length ? (
+              {scenarios.length ? (
                 <div className="space-y-2">
-                  {data.scenarios.map((scenario) => (
+                  {scenarios.map((scenario) => (
                     <div key={scenario.scenario_id} className="rounded-md border p-3 text-sm">
                       <div className="font-medium">{scenario.scenario_name}</div>
-                      <div className="text-xs text-muted-foreground">{scenario.region_filter} · {scenario.capability}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {scenario.region_filter} · {scenario.capability}
+                      </div>
                       {scenario.planner_notes && (
                         <div className="mt-1 text-xs text-muted-foreground line-clamp-2">{scenario.planner_notes}</div>
                       )}
@@ -580,7 +673,7 @@ function EmptyMap() {
         <FileText className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
         <h2 className="text-lg font-semibold">Tile layers are not loaded yet</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          The app expects curated Folium HTML in cache.tile_layers. Raw source data stays in Unity Catalog.
+          The app expects curated Folium HTML in public.tile_layers. Run the pipeline to generate them.
         </p>
       </div>
     </div>

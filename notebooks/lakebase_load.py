@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS public.desert_scores (
     total_count             INT,
     burden_imputed          BOOLEAN,
     updated_at              TIMESTAMPTZ,
+    raw_rank                INT,
+    adjusted_rank           INT,
     PRIMARY KEY (district_id, capability)
 );
 
@@ -114,6 +116,18 @@ CREATE TABLE IF NOT EXISTS public.facilities (
     description              TEXT,
     "yearEstablished"        TEXT
 );
+
+-- Add rank columns to existing tables (idempotent for re-runs)
+ALTER TABLE public.desert_scores ADD COLUMN IF NOT EXISTS raw_rank INT;
+ALTER TABLE public.desert_scores ADD COLUMN IF NOT EXISTS adjusted_rank INT;
+
+-- Indexes for app query performance
+CREATE INDEX IF NOT EXISTS idx_desert_scores_cap
+    ON public.desert_scores(capability, adjusted_desert_score DESC);
+CREATE INDEX IF NOT EXISTS idx_verdicts_district
+    ON public.phantom_verdicts(district_id);
+CREATE INDEX IF NOT EXISTS idx_tests_facility
+    ON public.facility_existence_tests(facility_id);
 """)
 print("DDL applied.")
 
@@ -139,6 +153,17 @@ def _write_table(df: pd.DataFrame, table: str, on_conflict: str = "") -> None:
     )
     print(f"  ✓ public.{table}: {len(clean):,} rows")
 
+
+# Precompute per-capability district ranks so the app can use a simple SELECT
+# instead of RANK() OVER window functions at query time.
+desert_scores["raw_rank"] = (
+    desert_scores.groupby("capability")["raw_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
+desert_scores["adjusted_rank"] = (
+    desert_scores.groupby("capability")["adjusted_desert_score"]
+    .rank(ascending=False, method="min").astype(int)
+)
 
 print("Writing to Lakebase...")
 _write_table(verdicts,        "phantom_verdicts")
