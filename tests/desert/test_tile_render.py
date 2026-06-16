@@ -1,15 +1,30 @@
-"""Tests for DS-TILE-001..004, DS-RANK-001..003, DS-CTR-001..003."""
+"""Tests for DS-TILE-001..005, DS-RANK-001..003, DS-CTR-001..003."""
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from phantom_census.desert_scoring.formula import compute_district_scores
 from phantom_census.desert_scoring.tiles import (
+    CAPABILITIES,
     build_rank_table,
     phantom_counter,
     render_tile_html,
     token_usage_indicator,
+    validate_tile_layers,
 )
+
+_GOOD_HTML = "<html><body>leaflet map " + "x" * 60_000 + "</body></html>"
+
+
+def _tiles_frame(rows: list[tuple[str, str]], html: str = _GOOD_HTML) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"capability": cap, "layer_type": lt, "html": html} for cap, lt in rows]
+    )
+
+
+def _complete_rows() -> list[tuple[str, str]]:
+    return [(cap, lt) for cap in CAPABILITIES for lt in ("raw", "adjusted")]
 
 
 # @spec DS-TILE-001
@@ -97,3 +112,48 @@ def test_phantom_counter_returns_total_for_capability(
 # @spec DS-CTR-003
 def test_token_usage_indicator_is_zero():
     assert token_usage_indicator() == "token_usage: 0"
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_accepts_complete_set():
+    tiles = _tiles_frame(_complete_rows())
+    # Returns the frame unchanged so it can be chained before a write.
+    assert validate_tile_layers(tiles, CAPABILITIES) is tiles
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_raises_on_missing_raw():
+    # The issue #5 regression: adjusted-only set for every capability.
+    tiles = _tiles_frame([(cap, "adjusted") for cap in CAPABILITIES])
+    with pytest.raises(RuntimeError) as exc:
+        validate_tile_layers(tiles, CAPABILITIES)
+    msg = str(exc.value)
+    assert "raw" in msg
+    # All five missing raw pairs reported, not just the first.
+    assert all(cap in msg for cap in CAPABILITIES)
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_raises_on_degenerate_html():
+    rows = _complete_rows()
+    tiles = _tiles_frame(rows)
+    # Blank out one tile's HTML — present as a row but unusable.
+    tiles.loc[(tiles["capability"] == "icu") & (tiles["layer_type"] == "raw"), "html"] = ""
+    with pytest.raises(RuntimeError, match="Degenerate"):
+        validate_tile_layers(tiles, CAPABILITIES)
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_rejects_html_without_leaflet_marker():
+    tiles = _tiles_frame(_complete_rows(), html="x" * 60_000)  # big but not a map
+    with pytest.raises(RuntimeError, match="Degenerate"):
+        validate_tile_layers(tiles, CAPABILITIES)
+
+
+# @spec DS-TILE-005
+def test_validate_tile_layers_rejects_duplicate_pair():
+    # Spec says exactly one per (capability, layer_type) — a duplicate row must
+    # be rejected, not silently collapsed.
+    tiles = _tiles_frame(_complete_rows() + [("maternity", "raw")])
+    with pytest.raises(RuntimeError, match="Duplicate"):
+        validate_tile_layers(tiles, CAPABILITIES)

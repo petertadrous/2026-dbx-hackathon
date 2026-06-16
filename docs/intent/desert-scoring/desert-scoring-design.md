@@ -43,6 +43,8 @@ Both layers are embedded in the Streamlit app as HTML strings. On toggle, the ap
 
 **Color scale:** Red intensity for desert severity (white = no desert, deep red = worst desert). Consistent between both layers so the color shift on toggle is interpretable as relative change, not scale change.
 
+**Completeness guard (DS-TILE-005):** Both the batch render and the Lakebase load validate the tile set before persisting it — every `(capability, layer_type)` pair must have one non-degenerate tile. This converts a partial render (e.g. a stale notebook that emits adjusted-only, the issue #5 regression) into a loud batch failure instead of silently shipping a set the app's raw toggle can't display. The check is shared (`validate_tile_layers` in `desert_scoring/tiles.py`) so generation and load enforce the same invariant.
+
 ## Incremental Recompute on Override
 
 When a planner override is saved to Lakebase:

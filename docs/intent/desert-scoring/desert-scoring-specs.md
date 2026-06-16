@@ -20,6 +20,7 @@ prefix: DS
 - [ ] **DS-TILE-002**: Both tile layers shall use the same red-intensity color scale (white = 0.0, deep red = 1.0) so toggle-induced color changes are interpretable as relative score differences on the same scale.
 - [ ] **DS-TILE-003**: The system shall load both pre-rendered tile layers for the active capability from `cache.tile_layers` as HTML strings at Streamlit app startup.
 - [ ] **DS-TILE-004**: When the planner toggles between raw and adjusted views, the system shall switch layer visibility using CSS `display: block / none` without issuing any server-side recompute request.
+- [ ] **DS-TILE-005**: At batch time, before persisting the tile layer set, the system shall verify that every `(capability, layer_type)` pair has exactly one non-degenerate tile — HTML present, at least a minimum size, and containing a Folium/Leaflet structural marker — and shall fail the batch with an error naming any missing or degenerate tile, rather than persisting a partial `tile_layers` set.
 
 ### District Rank Table
 

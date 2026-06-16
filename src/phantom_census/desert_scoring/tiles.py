@@ -1,18 +1,23 @@
 """Folium tile pre-rendering + ranking + counter helpers.
 
-@spec DS-TILE-001, DS-TILE-002, DS-TILE-003, DS-TILE-004,
+@spec DS-TILE-001, DS-TILE-002, DS-TILE-003, DS-TILE-004, DS-TILE-005,
       DS-RANK-001, DS-RANK-002, DS-RANK-003,
       DS-CTR-001, DS-CTR-002, DS-CTR-003
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Iterable, Literal
 
 import folium
 import geopandas as gpd
 import pandas as pd
 
 INDIA_CENTER = (22.0, 78.5)
+
+# Canonical supported-capability set. Single source of truth so the batch
+# render and the Lakebase load validate against the same expected set rather
+# than re-deriving it from whatever rows happen to be present.
+CAPABILITIES = ("maternity", "icu", "emergency", "trauma", "nicu")
 
 
 # @spec DS-TILE-001, DS-TILE-002
@@ -85,3 +90,60 @@ def phantom_counter(scores: pd.DataFrame) -> int:
 def token_usage_indicator() -> str:
     """Constant indicator surfaced in the planner header."""
     return "token_usage: 0"
+
+
+# @spec DS-TILE-005
+def validate_tile_layers(
+    tiles_df: pd.DataFrame,
+    capabilities: Iterable[str],
+    *,
+    layer_types: tuple[str, ...] = ("raw", "adjusted"),
+    min_html_len: int = 50_000,
+) -> pd.DataFrame:
+    """Fail loudly unless every (capability, layer_type) has one usable tile.
+
+    Guards the batch tile-render and Lakebase-load paths so a stale or partial
+    notebook can never silently ship an incomplete `tile_layers` set (e.g. the
+    adjusted-only regression from issue #5). Returns `tiles_df` unchanged on
+    success so callers can chain it before a write.
+
+    A tile is "usable" when its HTML is present, at least `min_html_len` chars,
+    and contains the Leaflet marker every Folium map emits — a size floor alone
+    is not enough to prove the choropleth actually rendered.
+
+    "Exactly one" per pair is enforced: a duplicated `(capability, layer_type)`
+    is rejected rather than collapsed.
+    """
+    expected = {(cap, lt) for cap in capabilities for lt in layer_types}
+
+    pair_counts = tiles_df.groupby(["capability", "layer_type"]).size()
+    present_pairs = set(pair_counts.index)
+    missing = sorted(expected - present_pairs)
+    if missing:
+        raise RuntimeError(
+            f"Missing tile layers for {len(missing)} (capability, layer_type) "
+            f"pair(s): {missing}"
+        )
+
+    duplicated = sorted(pair_counts[pair_counts > 1].index)
+    if duplicated:
+        raise RuntimeError(
+            f"Duplicate tile rows for (capability, layer_type) pair(s): {duplicated}"
+        )
+
+    html = tiles_df["html"].fillna("")
+    # Require the Leaflet marker outright (Folium always emits it); pairing it
+    # with the size floor catches a large HTML blob that isn't actually a map.
+    degenerate = tiles_df[
+        (html.str.len() < min_html_len) | ~html.str.contains("leaflet", case=False)
+    ]
+    if not degenerate.empty:
+        bad = sorted(
+            degenerate[["capability", "layer_type"]].itertuples(index=False, name=None)
+        )
+        raise RuntimeError(
+            f"Degenerate tile HTML (empty, < {min_html_len} chars, or missing "
+            f"Leaflet marker) for: {bad}"
+        )
+
+    return tiles_df
