@@ -157,7 +157,7 @@ verdicts["test_outcome_vector"] = verdicts["test_outcome_vector"].apply(
 verdicts = verdicts[
     ["facility_id", "facility_name", "district_id", "district_name",
      "state_name", "verdict", "reason", "test_outcome_vector", "ran_at"]
-]
+].drop_duplicates(subset=["facility_id"])
 
 print(f"phantom_verdicts enriched: {len(verdicts):,} rows, "
       f"{verdicts['district_name'].nunique()} districts")
@@ -342,7 +342,9 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GOLD_CATALOG}.{GOLD_SCHEMA}")
 
 def write_gold(df: pd.DataFrame, table: str) -> None:
     fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.{table}"
-    sdf = spark.createDataFrame(df)
+    import pyarrow as pa
+    arrow_table = pa.Table.from_pandas(df).combine_chunks()
+    sdf = spark.createDataFrame(arrow_table.to_pandas())
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(fqn)
     print(f"  ✓ {fqn}: {sdf.count():,} rows")
 
@@ -353,11 +355,12 @@ write_gold(tests,         "facility_existence_tests")
 write_gold(desert_scores, "desert_scores")
 write_gold(tiles_df,      "tile_layers")
 
-# Also write the facilities table for lookup by the app
+# Also write the facilities table for lookup by the app.
+# unique_id is not guaranteed unique in the VF dataset — deduplicate before writing.
 facilities_slim = facilities[[
     "facility_id", "facility_name", "address_city", "address_stateOrRegion",
     "latitude", "longitude", "pincode", "capability", "description", "yearEstablished",
-]].copy()
+]].drop_duplicates(subset=["facility_id"]).copy()
 write_gold(facilities_slim, "facilities")
 
 print("\nAll gold tables written. Next step: create synced tables via the CLI.")
