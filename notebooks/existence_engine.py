@@ -231,11 +231,16 @@ score_rows: list[dict] = []
 for cap in CAPABILITIES:
     cap_df = verdicts_meta[verdicts_meta[f"claims_{cap}"].fillna(False)].copy()
 
-    district_agg = cap_df.groupby(["district_id", "district_name", "state_name"]).agg(
+    # Group only on district_id — district_name/state_name vary in casing
+    # across facilities for the same district, which would produce duplicate
+    # (district_id, capability) rows and violate the Lakebase PK.
+    district_agg = cap_df.groupby("district_id", as_index=False).agg(
+        district_name=("district_name", "first"),
+        state_name=("state_name", "first"),
         phantom_count=("verdict", lambda x: (x == "phantom").sum()),
         real_count=("verdict", lambda x: (x == "real").sum()),
         contested_count=("verdict", lambda x: (x == "contested").sum()),
-    ).reset_index()
+    )
 
     district_agg["total_count"] = (
         district_agg["phantom_count"]
@@ -352,7 +357,7 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GOLD_CATALOG}.{GOLD_SCHEMA}")
 
 
 def _strip_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
-    for col in df.select_dtypes(include=["object"]).columns:
+    for col in df.select_dtypes(include=["object", "str"]).columns:
         df[col] = df[col].apply(lambda v: v.replace("\x00", "") if isinstance(v, str) else v)
     return df
 

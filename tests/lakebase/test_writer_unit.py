@@ -121,6 +121,33 @@ def test_writer_strips_nul_from_facility_id(monkeypatch):
     assert not any("\x00" in s for s in strings), "null byte survived into execute()"
 
 
+def test_writer_called_twice_with_same_facility_id_no_duplicate(monkeypatch):
+    """Same facility_id appearing in both verdicts and tests must not cause a
+    duplicate-key error — guards against the noisy VF dataset where unique_id
+    is not enforced unique."""
+    engine, conn = _make_engine()
+    ran_at = datetime(2026, 6, 15, tzinfo=timezone.utc)
+    m = MinHash(num_perm=128)
+    m.update(b"x")
+
+    # Two rows for the same facility_id (mirrors the VF dataset duplication)
+    verdicts = pd.DataFrame([
+        {"facility_id": "DUP1", "verdict": "real",    "reason": None, "test_outcome_vector": [], "ran_at": ran_at},
+        {"facility_id": "DUP1", "verdict": "phantom", "reason": "copy", "test_outcome_vector": [], "ran_at": ran_at},
+    ])
+    tests = pd.DataFrame([
+        {"facility_id": "DUP1", "test_name": "pin-reverse-lookup", "result": "pass", "evidence_ref": None, "ran_at": ran_at},
+        {"facility_id": "DUP1", "test_name": "pin-reverse-lookup", "result": "fail", "evidence_ref": None, "ran_at": ran_at},
+    ])
+    outputs = EngineOutputs(
+        facility_existence_tests=tests,
+        phantom_verdicts=verdicts,
+        claim_minhash_signatures={"DUP1": m},
+    )
+    # Should not raise — writer deduplicates or uses ON CONFLICT
+    load_engine_outputs(outputs, engine, ran_at=ran_at)
+
+
 def test_clean_data_passes_through_unchanged():
     """Ensure the stripping logic doesn't mutate clean values."""
     engine, conn = _make_engine()
