@@ -171,7 +171,10 @@ tests["evidence_ref"] = tests["evidence_ref"].apply(
     lambda v: json.dumps(v) if isinstance(v, (dict, list)) else
               ("null" if v is None else json.dumps(str(v)))
 )
-tests = tests[["facility_id", "test_name", "result", "evidence_ref", "ran_at"]]
+tests = (
+    tests[["facility_id", "test_name", "result", "evidence_ref", "ran_at"]]
+    .drop_duplicates(subset=["facility_id", "test_name"], keep="last")
+)
 
 # COMMAND ----------
 # ── 7. Compute desert scores per district per capability ──────────────────────
@@ -461,14 +464,14 @@ CREATE TABLE IF NOT EXISTS public.facilities (
 print("DDL applied.")
 
 
-def _write_table(df: pd.DataFrame, table: str) -> None:
+def _write_table(df: pd.DataFrame, table: str, on_conflict: str = "") -> None:
     clean = _strip_null_bytes(df.copy()).where(pd.notnull(df), other=None)
     cols  = list(clean.columns)
     col_list = ", ".join(f'"{c}"' for c in cols)
     cur.execute(f'TRUNCATE TABLE public."{table}"')
     psycopg2.extras.execute_values(
         cur,
-        f'INSERT INTO public."{table}" ({col_list}) VALUES %s',
+        f'INSERT INTO public."{table}" ({col_list}) VALUES %s {on_conflict}'.strip(),
         [tuple(row) for row in clean.itertuples(index=False)],
         page_size=500,
     )
@@ -477,7 +480,8 @@ def _write_table(df: pd.DataFrame, table: str) -> None:
 
 print("Writing to Lakebase...")
 _write_table(verdicts,        "phantom_verdicts")
-_write_table(tests,           "facility_existence_tests")
+_write_table(tests,           "facility_existence_tests",
+             "ON CONFLICT (facility_id, test_name) DO NOTHING")
 _write_table(desert_scores,   "desert_scores")
 _write_table(tiles_df,        "tile_layers")
 _write_table(facilities_slim, "facilities")
