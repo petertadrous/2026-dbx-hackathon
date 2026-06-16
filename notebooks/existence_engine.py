@@ -311,6 +311,11 @@ def build_choropleth(
     # extend into Pakistan/China-administered disputed territory.
     merged = merged.clip(shapely_box(68.0, 6.0, 97.5, 37.5))
 
+    # Simplify district polygon geometry before embedding as GeoJSON.
+    # 0.01° tolerance (~1 km at India's latitude) cuts vertex count 10–50×
+    # and makes the tile HTML small enough for fast browser rendering.
+    merged["geometry"] = merged["geometry"].simplify(0.01, preserve_topology=True)
+
     m = folium.Map(location=[22.0, 79.0], zoom_start=5, tiles="CartoDB positron")
 
     folium.Choropleth(
