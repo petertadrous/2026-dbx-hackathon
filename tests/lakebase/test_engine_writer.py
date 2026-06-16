@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import numpy as np
+import pandas as pd
 import pytest
 from datasketch import MinHash
 from sqlalchemy import text
@@ -111,3 +112,41 @@ def test_writer_rolls_back_entire_batch_on_inner_failure(engine, sample_engine_o
     assert n_tests == 0
     assert n_verdicts == 0
     assert n_sigs == 0
+
+
+# @spec LP-EE-001, LP-EE-002
+def test_writer_strips_null_bytes_in_string_fields(engine, sample_engine_outputs):
+    """Null bytes (0x00) in facility_name or reason must be silently stripped.
+    psycopg raises ValueError on NUL literals; this guards against raw VF data."""
+    from phantom_census.lakebase.writer import load_engine_outputs
+    from phantom_census.existence_engine.pipeline import EngineOutputs
+
+    ran_at = datetime(2026, 6, 15, tzinfo=timezone.utc)
+
+    dirty_verdicts = sample_engine_outputs.phantom_verdicts.copy()
+    dirty_verdicts.loc[dirty_verdicts["facility_id"] == "F2", "reason"] = "veto\x00fail"
+
+    dirty_tests = sample_engine_outputs.facility_existence_tests.copy()
+    dirty_tests.loc[dirty_tests["facility_id"] == "F1", "result"] = "pa\x00ss"
+
+    dirty_outputs = EngineOutputs(
+        facility_existence_tests=dirty_tests,
+        phantom_verdicts=dirty_verdicts,
+        claim_minhash_signatures=sample_engine_outputs.claim_minhash_signatures,
+    )
+
+    # Must not raise
+    load_engine_outputs(dirty_outputs, engine, ran_at=ran_at)
+
+    with engine.begin() as conn:
+        reason = conn.execute(text(
+            "SELECT reason FROM operational.phantom_verdicts WHERE facility_id='F2'"
+        )).scalar_one()
+        result = conn.execute(text(
+            "SELECT result FROM operational.facility_existence_tests "
+            "WHERE facility_id='F1' AND test_name='pin-reverse-lookup'"
+        )).scalar_one()
+
+    assert "\x00" not in (reason or "")
+    assert reason == "vetofail"
+    assert result == "pass"
