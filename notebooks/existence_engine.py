@@ -357,7 +357,7 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GOLD_CATALOG}.{GOLD_SCHEMA}")
 
 
 def _strip_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
-    for col in df.select_dtypes(include=["object", "str"]).columns:
+    for col in df.select_dtypes(include=["object"]).columns:
         df[col] = df[col].apply(lambda v: v.replace("\x00", "") if isinstance(v, str) else v)
     return df
 
