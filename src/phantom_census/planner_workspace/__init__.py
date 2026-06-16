@@ -11,7 +11,9 @@ def main() -> None:
     from phantom_census.lakebase.engine import get_engine
 
     from .session import init_session_state, resolve_planner_id
-    from .views import map_view, override_modal, scenario_panel, side_panel
+    from .views import (
+        map_view, override_modal, rank_movers, scenario_panel, side_panel,
+    )
 
     @st.cache_resource
     def _engine() -> Engine:
@@ -45,6 +47,7 @@ def main() -> None:
     map_col, panel_col = st.columns([0.6, 0.4])
     with map_col:
         map_view.render(engine, workspace)
+        rank_movers.render(engine, workspace)
     with panel_col:
         side_panel.render(engine, workspace)
         override_modal.render(engine, workspace)

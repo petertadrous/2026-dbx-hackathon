@@ -73,6 +73,27 @@ def test_counts_match_inputs(
 
 
 # @spec DS-SCORE-004
+def test_state_filter_drops_out_of_state_nfhs_rows():
+    """The batch.run_desert_scoring state_filter restricts NFHS to one state
+    before computing burden weights. Smoke-test the filter at the data layer."""
+    nfhs = pd.DataFrame([
+        {"district_id": "BEED", "district_name": "Beed", "state_name": "Maharashtra",
+         "institutional_delivery_rate": 70.0},
+        {"district_id": "MUM",  "district_name": "Mumbai", "state_name": "Maharashtra",
+         "institutional_delivery_rate": 95.0},
+        {"district_id": "PAT",  "district_name": "Patna", "state_name": "Bihar",
+         "institutional_delivery_rate": 60.0},
+    ])
+    filtered = nfhs[nfhs["state_name"] == "Maharashtra"]
+    assert set(filtered["district_id"]) == {"BEED", "MUM"}
+    # State medians computed only on Maharashtra rows.
+    from phantom_census.desert_scoring.burden import state_medians_from_nfhs
+    medians = state_medians_from_nfhs(filtered, capability="maternity")
+    assert "Bihar" not in medians
+    assert medians["Maharashtra"] == 82.5  # median of [70, 95]
+
+
+# @spec DS-SCORE-004
 def test_maternity_capability_uses_institutional_delivery_rate(
     small_facilities_with_district, small_verdicts, small_nfhs
 ):

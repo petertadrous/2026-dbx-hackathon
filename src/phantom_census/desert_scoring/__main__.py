@@ -31,6 +31,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--nfhs", type=Path, required=True,
                    help="NFHS-5 district indicator CSV")
     p.add_argument("--capability", default="maternity")
+    p.add_argument("--state", default=None,
+                   help='Restrict scoring + tile render to one state '
+                        '(e.g. "Maharashtra" for the demo locked-state).')
     return p.parse_args(argv)
 
 
@@ -43,8 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         nfhs = nfhs.rename(columns={"state": "state_name"})
     engine = get_engine()
     n = run_desert_scoring(engine, capability=args.capability,
-                           districts_path=args.districts, nfhs=nfhs)
-    print(f"desert_scoring: wrote {n} district rows", file=sys.stderr)
+                           districts_path=args.districts, nfhs=nfhs,
+                           state_filter=args.state)
+    where = f" (state={args.state})" if args.state else ""
+    print(f"desert_scoring: wrote {n} district rows{where}", file=sys.stderr)
     return 0
 
 

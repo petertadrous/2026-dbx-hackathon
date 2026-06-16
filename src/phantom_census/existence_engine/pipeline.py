@@ -7,7 +7,7 @@ segment cascade owned by lakebase-persistence.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +39,7 @@ class EngineOutputs:
     facility_existence_tests: pd.DataFrame
     phantom_verdicts: pd.DataFrame
     claim_minhash_signatures: dict[str, MinHash]
+    facility_district_map: dict[str, str] = field(default_factory=dict)
 
 
 # @spec EE-PIPE-001..004, EE-HASH-001
@@ -84,10 +85,19 @@ def run_engine(inputs: EngineInputs, ran_at: datetime | None = None) -> EngineOu
 
     verdicts["ran_at"] = ran_at
 
+    # @spec EE-PIPE-001 — the spatial-district assignment is the only place
+    # downstream segments can learn which district owns a facility; expose
+    # it explicitly so lakebase + desert-scoring can populate the xref.
+    fdm_df = facilities_with_district[["facility_id", "spatial_district"]].dropna(
+        subset=["spatial_district"]
+    )
+    facility_district_map = dict(zip(fdm_df["facility_id"], fdm_df["spatial_district"]))
+
     return EngineOutputs(
         facility_existence_tests=facility_tests,
         phantom_verdicts=verdicts,
         claim_minhash_signatures=signatures,
+        facility_district_map=facility_district_map,
     )
 
 
@@ -99,6 +109,7 @@ def write_outputs(outputs: EngineOutputs, out_dir: Path) -> None:
       facility_existence_tests.parquet  — long-format test results
       phantom_verdicts.parquet          — one row per facility verdict
       claim_minhash.parquet             — BYTEA cache (EE-HASH-001)
+      facility_district_xref.csv        — facility_id -> district_id (Lakebase + DS input)
 
     Lakebase load (operational.* + cache.claim_minhash) is the
     lakebase-persistence segment's responsibility.
@@ -108,3 +119,7 @@ def write_outputs(outputs: EngineOutputs, out_dir: Path) -> None:
     outputs.facility_existence_tests.to_parquet(out_dir / "facility_existence_tests.parquet")
     outputs.phantom_verdicts.to_parquet(out_dir / "phantom_verdicts.parquet")
     persist_signatures(outputs.claim_minhash_signatures, out_dir / "claim_minhash.parquet")
+    pd.DataFrame(
+        [{"facility_id": fid, "district_id": did}
+         for fid, did in outputs.facility_district_map.items()]
+    ).to_csv(out_dir / "facility_district_xref.csv", index=False)

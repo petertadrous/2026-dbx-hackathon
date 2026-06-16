@@ -53,14 +53,21 @@ def run_desert_scoring(
     capability: str = "maternity",
     districts_path: Path,
     nfhs: pd.DataFrame,
+    state_filter: str | None = None,
     ran_at: datetime | None = None,
 ) -> int:
     """Read facilities + verdicts from Lakebase, compute scores, write back.
 
     Returns the count of district rows written.
+
+    `state_filter` restricts both the score computation and the rendered tile
+    layer to one state (e.g., ``"Maharashtra"``). NFHS rows outside the state
+    are dropped before computation so the burden weights are state-relative.
     """
     ran_at = ran_at or datetime.now(tz=timezone.utc)
     nfhs = normalize_nfhs_columns(nfhs)
+    if state_filter is not None:
+        nfhs = nfhs[nfhs.get("state_name") == state_filter].copy()
 
     with engine.connect() as conn:
         facilities = pd.DataFrame(conn.execute(text(
@@ -126,6 +133,9 @@ def run_desert_scoring(
             )
 
     districts_gdf = _load_districts(Path(districts_path))
+    if state_filter is not None:
+        in_state = set(scores["district_id"])
+        districts_gdf = districts_gdf[districts_gdf["district_id"].isin(in_state)]
     raw_html = render_tile_html(districts_gdf, scores,
                                 score_col="raw_desert_score",
                                 capability=capability)

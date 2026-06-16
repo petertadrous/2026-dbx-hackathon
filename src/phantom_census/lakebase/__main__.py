@@ -69,8 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "load":
         outputs = _load_outputs_from_disk(args.src)
         mapping: dict[str, str] = {}
-        if args.district_map and args.district_map.exists():
-            xref = pd.read_csv(args.district_map)
+        # Auto-load the xref emitted alongside the parquets unless the caller
+        # supplied an explicit override.
+        xref_path = args.district_map or (args.src / "facility_district_xref.csv")
+        if xref_path.exists():
+            xref = pd.read_csv(xref_path)
             mapping = dict(zip(xref["facility_id"], xref["district_id"]))
         stats = load_engine_outputs(
             outputs, engine, ran_at=datetime.now(tz=timezone.utc),
