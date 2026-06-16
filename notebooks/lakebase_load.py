@@ -23,7 +23,9 @@ from phantom_census.desert_scoring.tiles import CAPABILITIES, validate_tile_laye
 GOLD_CATALOG  = "workspace"
 GOLD_SCHEMA   = "phantom_census"
 LAKEBASE_EP   = "projects/phantom-census/branches/production/endpoints/primary"
-LAKEBASE_HOST = "ep-empty-rice-d8xtqsho.database.us-east-2.cloud.databricks.com"
+# Lakebase endpoint host is derived dynamically from the SDK so this notebook
+# is portable across workspaces that share the same project/branch/endpoint
+# names. See the WorkspaceClient setup in section 2 below.
 
 # COMMAND ----------
 # ── 1. Read gold Delta tables from UC ────────────────────────────────────────
@@ -47,6 +49,8 @@ print(f"  facilities:               {len(facilities_slim):,} rows")
 w    = WorkspaceClient()
 cred = w.postgres.generate_database_credential(LAKEBASE_EP)
 me   = w.current_user.me()
+LAKEBASE_HOST = w.postgres.get_endpoint(LAKEBASE_EP).status.hosts.host
+print(f"  Lakebase endpoint host: {LAKEBASE_HOST}")
 
 conn = psycopg2.connect(
     host=LAKEBASE_HOST,

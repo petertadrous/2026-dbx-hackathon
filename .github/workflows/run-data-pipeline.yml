@@ -1,0 +1,141 @@
+name: Run data pipeline (engine + Lakebase load)
+
+# Manually triggered. Builds a phantom_census wheel from src/, uploads the
+# notebooks and the wheel to the workspace, then submits a serverless job
+# that runs notebooks/existence_engine.py followed by notebooks/lakebase_load.py.
+# After success, the React app's queries against Lakebase return data instead
+# of 500.
+#
+# Required repository secrets (same as deploy-react-app.yml):
+#   DATABRICKS_HOST           — workspace URL (https://...)
+#   DATABRICKS_CLIENT_ID      — service principal client id
+#   DATABRICKS_CLIENT_SECRET  — service principal client secret
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: run-data-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build phantom_census wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+          ls -lh dist/
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Resolve current SP user
+        id: me
+        run: |
+          USER=$(databricks current-user me -o json | python3 -c "import json,sys; print(json.load(sys.stdin)['userName'])")
+          echo "user=$USER" >> "$GITHUB_OUTPUT"
+          echo "Service principal user: $USER"
+
+      - name: Upload notebooks to workspace
+        run: |
+          NB_DIR="/Users/${{ steps.me.outputs.user }}/data-pipeline"
+          databricks workspace mkdirs "$NB_DIR" || true
+          databricks workspace import-dir notebooks "$NB_DIR" --overwrite
+          echo "Notebooks uploaded to: $NB_DIR"
+
+      - name: Upload wheel to workspace files
+        id: wheel
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          WHEEL_NAME=$(basename "$WHEEL")
+          WS_WHEEL_PATH="/Users/${{ steps.me.outputs.user }}/data-pipeline/wheels/$WHEEL_NAME"
+          databricks workspace mkdirs "/Users/${{ steps.me.outputs.user }}/data-pipeline/wheels" || true
+          databricks workspace import --format AUTO --file "$WHEEL" "$WS_WHEEL_PATH" --overwrite || \
+            databricks workspace import "$WS_WHEEL_PATH" --format AUTO --file "$WHEEL" --overwrite
+          echo "wheel_path=$WS_WHEEL_PATH" >> "$GITHUB_OUTPUT"
+          echo "Wheel uploaded to: $WS_WHEEL_PATH"
+
+      - name: Submit pipeline job
+        id: submit
+        run: |
+          NB_ROOT="/Users/${{ steps.me.outputs.user }}/data-pipeline"
+          WHEEL_PATH="${{ steps.wheel.outputs.wheel_path }}"
+          SUBMIT_JSON=$(cat <<EOF
+          {
+            "run_name": "phantom-census-pipeline (CI ${{ github.run_id }})",
+            "tasks": [
+              {
+                "task_key": "engine",
+                "notebook_task": {
+                  "notebook_path": "$NB_ROOT/existence_engine",
+                  "source": "WORKSPACE"
+                },
+                "environment_key": "default"
+              },
+              {
+                "task_key": "load",
+                "depends_on": [{"task_key": "engine"}],
+                "notebook_task": {
+                  "notebook_path": "$NB_ROOT/lakebase_load",
+                  "source": "WORKSPACE"
+                },
+                "environment_key": "default"
+              }
+            ],
+            "environments": [
+              {
+                "environment_key": "default",
+                "spec": {
+                  "client": "1",
+                  "dependencies": ["/Workspace$WHEEL_PATH"]
+                }
+              }
+            ]
+          }
+          EOF
+          )
+          RUN_ID=$(echo "$SUBMIT_JSON" | databricks jobs submit --json @/dev/stdin -o json | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Job submitted with run_id=$RUN_ID"
+          echo "Watch in workspace: ${DATABRICKS_HOST}/jobs/runs/$RUN_ID"
+
+      - name: Poll for completion
+        run: |
+          RUN_ID="${{ steps.submit.outputs.run_id }}"
+          while true; do
+            STATUS_JSON=$(databricks jobs get-run "$RUN_ID" -o json)
+            STATE=$(echo "$STATUS_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',{}).get('state') or d.get('state',{}).get('life_cycle_state','UNKNOWN'))")
+            echo "State: $STATE"
+            case "$STATE" in
+              TERMINATED|SUCCESS)
+                RESULT=$(echo "$STATUS_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',{}).get('termination_details',{}).get('code') or d.get('state',{}).get('result_state','UNKNOWN'))")
+                echo "Result: $RESULT"
+                if [ "$RESULT" = "SUCCESS" ]; then exit 0; else exit 1; fi
+                ;;
+              INTERNAL_ERROR|SKIPPED|FAILED)
+                echo "Job ended with $STATE"
+                exit 1
+                ;;
+              *)
+                sleep 30
+                ;;
+            esac
+          done
