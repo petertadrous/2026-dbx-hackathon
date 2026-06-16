@@ -364,10 +364,8 @@ def _strip_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
 
 def write_gold(df: pd.DataFrame, table: str) -> None:
     fqn = f"{GOLD_CATALOG}.{GOLD_SCHEMA}.{table}"
-    import pyarrow as pa
     df = _strip_null_bytes(df.copy())
-    arrow_table = pa.Table.from_pandas(df).combine_chunks()
-    sdf = spark.createDataFrame(arrow_table.to_pandas())
+    sdf = spark.createDataFrame(df)
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(fqn)
     print(f"  ✓ {fqn}: {sdf.count():,} rows")
 
