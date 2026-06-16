@@ -32,9 +32,14 @@ prefix: PW
 
 ### Export
 
-- [ ] **PW-EXP-001**: When the planner clicks "Export Plan", the system shall write a CKAN-compatible CSV to the configured S3 watched prefix containing: district name, state, `raw_desert_score`, `adjusted_desert_score`, `phantom_count`, `verified_facility_count`, and any override notes for the session.
-- [ ] **PW-EXP-002**: When the planner clicks "Export Plan", the system shall POST a JSON payload to the mock HMIS webhook endpoint containing the top-5 priority districts (by `adjusted_desert_score`) and their scores.
-- [ ] **PW-EXP-003**: If the S3 write or HMIS webhook POST fails, the system shall display an error message in the side panel without disrupting the rest of the app state.
+> **Deferred (post-MVP).** Per scope decision recorded in the project plan,
+> the Export Plan surface is not in scope for the hackathon build. The three
+> specs below remain as the contract for a future cascade and are intentionally
+> uncovered by tests or code.
+
+- [ ] **PW-EXP-001** *(deferred)*: When the planner clicks "Export Plan", the system shall write a CKAN-compatible CSV to the configured S3 watched prefix containing: district name, state, `raw_desert_score`, `adjusted_desert_score`, `phantom_count`, `verified_facility_count`, and any override notes for the session.
+- [ ] **PW-EXP-002** *(deferred)*: When the planner clicks "Export Plan", the system shall POST a JSON payload to the mock HMIS webhook endpoint containing the top-5 priority districts (by `adjusted_desert_score`) and their scores.
+- [ ] **PW-EXP-003** *(deferred)*: If the S3 write or HMIS webhook POST fails, the system shall display an error message in the side panel without disrupting the rest of the app state.
 
 ### Scenario Persistence
 

@@ -16,7 +16,7 @@ prefix: LP
 
 - [ ] **LP-EE-001**: The existence engine batch shall write one row per `(facility_id, test_name)` to `operational.facility_existence_tests` for each test executed, including `result`, `evidence_ref` (JSONB), and `ran_at`.
 - [ ] **LP-EE-002**: The existence engine batch shall write one row per `facility_id` to `operational.phantom_verdicts` with `verdict`, `test_outcome_vector`, and `ran_at`, overwriting any prior row for the same `facility_id`.
-- [ ] **LP-EE-003**: The existence engine batch shall write one row per `facility_id` to `cache.description_minhash` with the 128-permutation MinHash signature, overwriting any prior row.
+- [ ] **LP-EE-003**: The existence engine batch shall write one row per `facility_id` (with a non-null signature) to `cache.claim_minhash` with the 128-permutation MinHash signature as BYTEA, overwriting any prior row. The cache key is named for the claim-array text (capability + procedure + equipment) the signature represents — see EE-HASH-001.
 - [ ] **LP-EE-004**: All existence engine writes shall commit atomically per facility — either all five test rows and the verdict row commit together, or none do.
 
 ### Reads from App
