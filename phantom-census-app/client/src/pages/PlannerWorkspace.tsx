@@ -10,6 +10,7 @@ import {
 } from '@databricks/appkit-ui/react';
 import { Activity, BookmarkPlus, CheckCircle2, Database, FileText, MapPinned, RefreshCw, ShieldAlert, XCircle } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { GIT_HASH } from '../git-hash';
 
 type Capability = 'maternity' | 'icu' | 'emergency' | 'trauma' | 'nicu';
 
@@ -346,6 +347,7 @@ export function PlannerWorkspace() {
             <p className="text-sm text-muted-foreground">
               Subtract questionable facilities before ranking healthcare deserts.
             </p>
+            <p className="font-mono text-xs text-muted-foreground/60">{GIT_HASH}</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
