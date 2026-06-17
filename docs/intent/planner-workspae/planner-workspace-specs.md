@@ -7,20 +7,25 @@ prefix: PW
 
 ### Choropleth View
 
-- [ ] **PW-MAP-001**: The system shall display an India choropleth map using pre-rendered Folium tile layers, with districts colored by red-intensity proportional to the active desert score.
-- [ ] **PW-MAP-002**: The system shall display a capability selector (dropdown) above the choropleth; changing the selection shall reload the pre-rendered tile layers for the selected capability.
-- [ ] **PW-MAP-003**: The system shall display a two-state toggle labeled "Raw" and "Adjusted" above the choropleth; the active state shall be visually distinguished.
-- [ ] **PW-MAP-004**: When the planner activates the "Adjusted" toggle, the system shall swap to the adjusted tile layer using CSS visibility change with no server-side recompute.
+- [ ] **PW-MAP-001**: The system shall display an India choropleth map using the pre-rendered Folium adjusted tile layer, with districts colored by red-intensity proportional to `adjusted_desert_score`.
+- [ ] **PW-MAP-002**: The system shall display a capability selector (dropdown) above the choropleth; changing the selection shall reload the pre-rendered adjusted tile layer for the selected capability.
 - [ ] **PW-MAP-005**: The system shall display a "Phantoms removed: N" counter in the map header, where N is the count of phantom-verdicted facilities for the currently selected capability.
-- [ ] **PW-MAP-006**: The system shall display a "token_usage: 0" indicator in the map header.
-- [ ] **PW-MAP-007**: When the planner activates the Adjusted toggle, the phantoms-removed counter shall animate from 0 to N over 0.5 seconds.
+- [ ] **PW-MAP-006**: The system shall display a "token_usage: 0" indicator in the map header, reflecting that the verdict and scoring pipeline makes no LLM calls.
+- [ ] **PW-MAP-008**: The choropleth tile shall include orange CircleMarkers on the top-30 districts by `rank_shift`, baked into the pre-rendered HTML at batch time (see DS-MARKER-001–003).
 
 ### District Side Panel
 
-- [ ] **PW-PANEL-001**: When the planner clicks a district on the choropleth, the system shall display a side panel with the district's name, `adjusted_desert_score`, `raw_desert_score`, raw rank, adjusted rank, and rank delta.
-- [ ] **PW-PANEL-002**: The side panel shall list up to 5 example phantom facilities for the selected district, each showing the facility name, its top-failed test name, and a one-line summary of the failing evidence.
-- [ ] **PW-PANEL-003**: Each phantom example in the side panel shall include a link or expandable row revealing the full test evidence (India Post row, MinHash cluster members, NFHS-5 indicator value, etc.) drawn from `operational.facility_existence_tests`.
-- [ ] **PW-PANEL-004**: The side panel shall remain visible and updated when the planner toggles between raw and adjusted views.
+- [ ] **PW-PANEL-001**: When the planner clicks a district on the choropleth, the system shall display a side panel with the district's name, `adjusted_desert_score`, `raw_desert_score`, `raw_rank`, `adjusted_rank`, and `rank_shift`.
+- [ ] **PW-PANEL-002**: The side panel shall list up to 10 example phantom facilities for the selected district, each showing the facility name, its top-failed test name, and verdict.
+- [ ] **PW-PANEL-003**: Each phantom example in the side panel shall include a link or expandable row revealing the full test evidence (India Post row, MinHash cluster members, NFHS-5 indicator value, etc.) drawn from `public.facility_existence_tests`.
+- [ ] **PW-PANEL-004**: The side panel shall remain visible and updated when the planner changes the capability selector.
+
+### AI Verification Brief
+
+- [ ] **PW-BRIEF-001**: When a district is selected, the system shall display an "AI Verification Brief" card in the side panel with a "Generate Brief" button.
+- [ ] **PW-BRIEF-002**: When the planner clicks "Generate Brief", the system shall call `GET /api/planner/districts/:id/brief?capability=<cap>` and stream the response via SSE, rendering text incrementally as each `data: {"text": "..."}` event arrives.
+- [ ] **PW-BRIEF-003**: The generated brief shall contain exactly four sections: Phantom Pattern, Priority Targets, Rank-Shift Risk, and Ministry Recommendation, produced by the Llama 3.3 70B Foundation Model API (`databricks-meta-llama-3-3-70b-instruct`) using the district's phantom list and test-failure evidence as input.
+- [ ] **PW-BRIEF-004**: The brief shall clear when the planner selects a different district or changes the capability; the "Generate Brief" button shall change to "Regenerate" after a brief has been generated for the current district.
 
 ### Override Panel
 
@@ -45,5 +50,5 @@ prefix: PW
 
 - [ ] **PW-SCEN-001**: When the planner clicks "Save Scenario", the system shall prompt for a scenario name and write the current session state to `team.saved_scenarios` in Lakebase: `scenario_name`, `capability`, `region_filter`, `override_set` (JSONB array of override IDs), `planner_notes`, and `saved_at`.
 - [ ] **PW-SCEN-002**: On app load, the system shall display a list of saved scenarios for the current planner session; selecting one shall restore the saved capability, region filter, and override set.
-- [ ] **PW-SCEN-003**: When a saved scenario is loaded, the system shall apply the stored override set to `operational.phantom_verdicts` and recompute affected district scores before rendering the choropleth.
+- [ ] **PW-SCEN-003**: When a saved scenario is loaded, the system shall apply the stored override set to `public.phantom_verdicts` and recompute affected district scores before rendering the choropleth.
 - [ ] **PW-SCEN-004**: A restored scenario shall produce an identical choropleth state to the state when the scenario was saved, given the same underlying phantom verdicts.

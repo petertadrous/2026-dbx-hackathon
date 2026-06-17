@@ -7,9 +7,9 @@ prefix: DS
 
 ## Context and Design Philosophy
 
-The Desert Scoring component computes per-district desert scores in two states: `raw` (all facilities counted) and `adjusted` (phantom-verdicted facilities subtracted). It also pre-renders the choropleth tile layers consumed by the Planner Workspace.
+The Desert Scoring component computes per-district desert scores in two states: `raw` (all facilities counted) and `adjusted` (phantom-verdicted facilities subtracted). It pre-renders the choropleth tile layer consumed by the Planner Workspace and computes per-district rank shifts that drive the phantom-impact markers.
 
-The central constraint is demo reliability: the choropleth redraw must be instantaneous and must not depend on live computation or Free Edition CDC behavior. The chosen approach is CSS opacity swap of pre-rendered tile layers — the two layers are both loaded on page start; toggling switches which is visible. The "live recompute" feel comes from the district rank counter updating (a fast Lakebase read), not from re-running the scoring pipeline.
+The central constraint is demo reliability: the choropleth must load instantly without live computation. A single pre-rendered adjusted tile layer is served; phantom-impact CircleMarkers are baked into that tile at batch time, overlaying the top-30 districts by `rank_shift` (districts most exposed by phantom removal).
 
 A planner override (force-real / force-phantom) *does* trigger a recompute — but of a single district's score, not the full 706-district aggregate. The recompute path is: Lakebase override write → increment/decrement the district's `phantom_count` by 1 → recompute that district's `adjusted_desert_score` → update the pre-rendered tile for that one district. This is bounded and fast.
 
@@ -31,45 +31,46 @@ Where:
 
 **Score direction:** subtracting phantoms *increases* `adjusted_desert_score` relative to `raw_desert_score` — a district with phantom-inflated facility counts looks less underserved than it really is; removing the phantoms reveals the true gap. An override that marks a facility as phantom increases `phantom_count` → reduces `effective_facility_count` → raises the district's `adjusted_desert_score`. Implementers and tests must assert `adjusted > raw` when phantoms are present, not `adjusted < raw`.
 
+**Rank shift:** `rank_shift(d) = raw_rank(d) − adjusted_rank(d)`. A positive value means the district jumped up the "underserved" list after phantom removal — phantoms were hiding its true desert status. Stored in `desert_scores` alongside the scores; used to drive CircleMarker sizing on the tile.
+
 The formula is intentionally simple and auditable. A planner who asks "how is this calculated?" gets a one-sentence answer.
 
 ## Tile Layer Pre-rendering
 
-Two Folium choropleth layers are pre-rendered at batch time:
-1. `raw_layer` — districts colored by `raw_desert_score`
-2. `adjusted_layer` — districts colored by `adjusted_desert_score`
+One Folium choropleth layer is pre-rendered at batch time:
 
-Both layers are embedded in the Streamlit app as HTML strings. On toggle, the app switches `display: block / none` between the two layers. No server round-trip; no live Lakebase read for the toggle itself.
+- `adjusted_layer` — districts colored by `adjusted_desert_score` (red intensity, white = 0.0, deep red = 1.0)
 
-**Color scale:** Red intensity for desert severity (white = no desert, deep red = worst desert). Consistent between both layers so the color shift on toggle is interpretable as relative change, not scale change.
+The layer is embedded in the app as an HTML string and loaded at startup. No toggle; the adjusted view is the primary (and only) choropleth view.
 
-**Completeness guard (DS-TILE-005):** Both the batch render and the Lakebase load validate the tile set before persisting it — every `(capability, layer_type)` pair must have one non-degenerate tile. This converts a partial render (e.g. a stale notebook that emits adjusted-only, the issue #5 regression) into a loud batch failure instead of silently shipping a set the app's raw toggle can't display. The check is shared (`validate_tile_layers` in `desert_scoring/tiles.py`) so generation and load enforce the same invariant.
+**Phantom-impact CircleMarkers:** After the base choropleth is built, orange `folium.CircleMarker` overlays are added for the top-30 districts by `rank_shift` (threshold: 80th percentile of `rank_shift`, minimum 15). Marker radius is proportional to `rank_shift` (clamped 5–16 px). This encodes both desert severity (choropleth color) and phantom distortion (circle size/presence) in a single view without a toggle.
+
+**Completeness guard (DS-TILE-005):** The batch render and Lakebase load both validate the tile set before persisting — every `(capability, layer_type)` pair must have exactly one non-degenerate tile. Partial renders fail loudly rather than shipping silently.
 
 ## Incremental Recompute on Override
 
 When a planner override is saved to Lakebase:
 
 1. `planner_overrides` write commits (ACID)
-2. A Streamlit callback reads the single affected district's new `phantom_count` from `desert_scores`
+2. A server-side callback reads the single affected district's new `phantom_count` from `desert_scores`
 3. The formula is applied in-process (no batch re-run)
-4. The affected district's polygon color is updated in the already-loaded Folium layer
-5. The district rank table re-sorts
+4. The affected district's row in the ranking table re-sorts with the new score
 
 This path operates on a single district and completes in < 1 second on the demo dataset.
 
 ## District Ranking Table
 
 A companion ranked list shows all districts sorted by `adjusted_desert_score` descending. Updates on:
-- Toggle (switches between `raw_desert_score` sort and `adjusted_desert_score` sort)
 - Override save (re-sorts with new score for the affected district)
 
-The table also shows the rank delta (adjusted rank vs. raw rank) so planners can see which districts moved and by how much.
+The table shows `rank_shift` (adjusted rank vs. raw rank) so planners can see which districts moved and by how much.
 
 ## Decisions & Alternatives
 
 | Decision | Chosen | Alternatives Considered | Rationale |
 |---|---|---|---|
-| Choropleth redraw | CSS opacity swap of pre-rendered layers | Live Lakebase CDC → reactive Streamlit push | CDC on Free Edition is unverified; pre-rendered swap achieves identical visual effect with no runtime dependency risk. |
+| Choropleth view | Single adjusted view with CircleMarkers | Two-layer CSS opacity swap (raw ↔ adjusted) | Single view communicates both desert severity and phantom distortion without two nearly-identical choropleths that are hard to compare. CircleMarker size encodes rank_shift directly. Removes the toggle that required loading and switching two large HTML blobs. |
+| Phantom-impact encoding | Orange CircleMarkers on top-30 rank-shift districts, baked into tile HTML | Separate overlay toggle; client-side rendering | Baking into the pre-rendered tile avoids any client-side Leaflet wiring complexity and works with the existing HTML-string tile approach. |
 | Incremental override recompute | Single-district in-process recompute | Full 706-district batch re-run | Single-district is bounded (<1s); full re-batch is too slow for a live demo. |
 | Score formula | Deterministic, simple, one-sentence-explainable | ML-based facility quality score | Reproducibility and planner trust. A judge who asks "how is the score computed?" gets an immediate clear answer. |
 | Tile format | Folium GeoJSON overlay as HTML string | External tile server | Free Edition has no external tile server. In-process Folium produces identical output. |
@@ -77,7 +78,7 @@ The table also shows the rank delta (adjusted rank vs. raw rank) so planners can
 ## Open Questions & Future Decisions
 
 ### Resolved
-1. ✅ Toggle uses CSS opacity swap, not Streamlit re-render. Rationale: avoids any risk of Streamlit re-render latency during the demo.
+1. ✅ Single adjusted tile with CircleMarkers replaces two-layer toggle. Rationale: one view communicates more than two similar choropleths; rank_shift is better encoded as a marker than as a color-diff that requires mental subtraction.
 
 ### Deferred
 1. Whether to add a secondary NFHS indicator selector (e.g., child vaccination rate for Track 1 capability alignment) — deferred to post-MVP if time allows.

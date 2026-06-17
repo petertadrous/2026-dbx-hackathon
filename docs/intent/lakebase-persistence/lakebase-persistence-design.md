@@ -49,6 +49,11 @@ Composite PK on `(facility_id, test_name, ran_at)`. Liquid-clustered on `facilit
 | `adjusted_desert_score` | FLOAT | 0–1 |
 | `verified_facility_count` | INT | |
 | `phantom_count` | INT | |
+| `contested_count` | INT | |
+| `total_count` | INT | |
+| `raw_rank` | INT | Rank by `raw_desert_score` descending within capability |
+| `adjusted_rank` | INT | Rank by `adjusted_desert_score` descending within capability |
+| `rank_shift` | INT | `raw_rank − adjusted_rank`; positive = district more underserved after phantom removal |
 | `burden_imputed` | BOOLEAN | True if NFHS indicator was imputed from state median |
 | `updated_at` | TIMESTAMP | |
 
@@ -71,11 +76,11 @@ Written once at batch time. Never updated unless the batch is re-run.
 | Column | Type | Notes |
 |---|---|---|
 | `capability` | VARCHAR | e.g. `maternity`, `icu` |
-| `layer_type` | VARCHAR | `raw` \| `adjusted` |
-| `html` | TEXT | Pre-rendered Folium choropleth HTML string |
+| `layer_type` | VARCHAR | `adjusted` (only value currently rendered) |
+| `html` | TEXT | Pre-rendered Folium choropleth HTML string including baked-in CircleMarkers |
 | `rendered_at` | TIMESTAMP | |
 
-Composite PK on `(capability, layer_type)`. Written at batch time; overwritten on each batch re-run. The Streamlit app reads one `(capability, layer_type)` pair per active view state.
+Composite PK on `(capability, layer_type)`. Written at batch time; overwritten on each batch re-run. The app reads the `adjusted` tile for each capability at startup.
 
 ### `team.planner_overrides`
 

@@ -28,10 +28,10 @@ Neither user is technical. Both need the map to speak for itself without narrati
 
 ## Goals
 
-- A planner can toggle "subtract phantoms" and see the choropleth redraw with ≥3 district rank changes in the demo state within 3 seconds.
+- A planner can see the phantom-adjusted choropleth with orange CircleMarkers on the top-30 rank-shift districts; selecting a district reveals a district score with ≥3 rank changes visible in the ranking table.
 - Every phantom verdict surfaces exactly which tests failed and the supporting evidence row from the source dataset — no claim without a cited row.
 - A planner override persists across page reload and propagates to the district desert score within 1 second.
-- Demo token usage: zero LLM calls at verdict time; LLM is opt-in narration only and defaults off.
+- Verdict pipeline token usage: zero LLM calls at verdict or scoring time. LLM (Llama 3.3 70B via Databricks Foundation Model API) is activated only for the opt-in AI Verification Brief per district.
 - The Day-0 validation suite (phantom_census_validation.md) runs cleanly against the real data before any product code is written.
 
 ## Non-Goals
@@ -86,15 +86,17 @@ Neither user is technical. Both need the map to speak for itself without narrati
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    DESERT SCORING (Gold)                                │
 │  Per-district incremental recompute via Lakebase CDC trigger           │
-│  desert_scores (raw) + desert_scores_adjusted (phantom-subtracted)     │
-│  Pre-rendered tile layers for choropleth (CSS opacity swap on toggle)  │
+│  desert_scores: raw + adjusted scores, raw_rank, adjusted_rank,        │
+│  rank_shift (raw_rank − adjusted_rank), phantom_count                  │
+│  Pre-rendered adjusted tile layer with phantom-impact CircleMarkers    │
 └─────────────┬───────────────────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                  PLANNER WORKSPACE (Databricks App)                    │
-│  Streamlit + Folium choropleth                                          │
-│  Two-state toggle: raw ↔ phantom-adjusted                              │
+│  React + AppKit + Folium choropleth (phantom-adjusted view only)       │
+│  Orange CircleMarkers on top-30 districts by rank_shift                │
+│  AI Verification Brief: on-demand per-district analysis (Llama 3.3 70B)│
 │  Side panel: example phantoms per district with test evidence rows     │
 │  Override panel: force-real / force-phantom with required reason note  │
 │  Export: CKAN-compatible CSV to S3 watched prefix + mock HMIS webhook  │
