@@ -5,6 +5,7 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install --quiet hatchling
 # MAGIC %pip install --quiet \
 # MAGIC   "git+https://github.com/petertadrous/2026-dbx-hackathon.git" \
 # MAGIC   "databricks-sdk>=0.81.0" \
@@ -436,30 +437,32 @@ tile_rows: list[dict] = []
 
 for cap in CAPABILITIES:
     cap_scores = desert_scores[desert_scores["capability"] == cap]
-    try:
-        html = build_choropleth(
-            districts, cap_scores,
-            "adjusted_desert_score",
-            f"{cap.title()} desert — phantom adjusted",
-        )
-        tile_rows.append({
-            "capability": cap,
-            "layer_type": "adjusted",
-            "html": html,
-            "rendered_at": ran_at,
-        })
-        print(f"  tile {cap}/adjusted: {len(html):,} chars")
-    except Exception as exc:
-        print(f"  WARN: tile {cap}/adjusted failed — {exc}")
+    for layer_type, score_col, label in [
+        ("raw",      "raw_desert_score",      "raw"),
+        ("adjusted", "adjusted_desert_score", "phantom adjusted"),
+    ]:
+        try:
+            html = build_choropleth(
+                districts, cap_scores,
+                score_col,
+                f"{cap.title()} desert — {label}",
+            )
+            tile_rows.append({
+                "capability": cap,
+                "layer_type": layer_type,
+                "html": html,
+                "rendered_at": ran_at,
+            })
+            print(f"  tile {cap}/{layer_type}: {len(html):,} chars")
+        except Exception as exc:
+            print(f"  WARN: tile {cap}/{layer_type} failed — {exc}")
 
 tiles_df = pd.DataFrame(tile_rows)
 print(f"\ntile_layers: {len(tiles_df)} tiles generated")
 
 # Fail the batch rather than write a partial tile_layers set: every capability
-# must have an adjusted tile (the React UI shows only the phantom-adjusted
-# choropleth with the rank-shift CircleMarker overlay — the raw tile was
-# retired with the Raw/Adjusted toggle).
-validate_tile_layers(tiles_df, CAPABILITIES, layer_types=("adjusted",))
+# must have both a raw and an adjusted tile (issue #5 — adjusted-only regression).
+validate_tile_layers(tiles_df, CAPABILITIES)
 
 # COMMAND ----------
 # ── 9. Write gold Delta tables to Unity Catalog ───────────────────────────────

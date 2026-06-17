@@ -4,6 +4,55 @@ The repo ships only the spatial layer (`geoBoundaries-IND-ADM2.geojson`,
 ~48 MB). The four operational inputs are pulled manually before the demo
 runs; they are not redistributed here.
 
+## Data flow
+
+How these inputs move from bronze through the deterministic engine to the app:
+
+```mermaid
+flowchart LR
+    subgraph Bronze["Bronze · Unity Catalog"]
+        F["facilities<br/>(VF registry)"]
+        IP["india_post<br/>pincode directory"]
+        N["nfhs_5<br/>district indicators"]
+        G["geoBoundaries<br/>ADM2 polygons"]
+    end
+
+    subgraph Engine["Existence Engine · deterministic, token_usage: 0"]
+        T["5 existence tests<br/>PIN · spatial · minhash · NFHS · temporal"]
+        A["Adjudicator<br/>→ real / phantom / contested"]
+        D["Defender<br/>phantom → contested rescue"]
+        S["Desert scoring<br/>raw &amp; phantom-adjusted"]
+        T --> A --> D --> S
+    end
+
+    subgraph Gold["Gold · Delta"]
+        V["phantom_verdicts"]
+        FT["facility_existence_tests"]
+        DS["desert_scores"]
+        TL["tile_layers<br/>(pre-rendered Folium)"]
+    end
+
+    subgraph Lakebase["Lakebase · Postgres"]
+        P["public.* tables"]
+    end
+
+    APP["React app<br/>choropleth + raw/adjusted toggle"]
+
+    F --> T
+    IP --> T
+    N --> T
+    G --> T
+    A --> V
+    T --> FT
+    S --> DS
+    S --> TL
+    V --> P
+    FT --> P
+    DS --> P
+    TL --> P
+    P --> APP
+```
+
 ## Required files
 
 | Path (place under `data/`) | Source | Used by |
