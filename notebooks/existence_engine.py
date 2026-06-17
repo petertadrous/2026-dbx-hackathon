@@ -5,6 +5,7 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install --quiet hatchling
 # MAGIC %pip install --quiet \
 # MAGIC   "git+https://github.com/petertadrous/2026-dbx-hackathon.git" \
 # MAGIC   "databricks-sdk>=0.81.0" \
