@@ -164,14 +164,32 @@ def _write_table(df: pd.DataFrame, table: str, on_conflict: str = "") -> None:
 
 # Precompute per-capability district ranks so the app can use a simple SELECT
 # instead of RANK() OVER window functions at query time.
-desert_scores["raw_rank"] = (
-    desert_scores.groupby("capability")["raw_desert_score"]
-    .rank(ascending=False, method="min").astype(int)
-)
-desert_scores["adjusted_rank"] = (
-    desert_scores.groupby("capability")["adjusted_desert_score"]
-    .rank(ascending=False, method="min").astype(int)
-)
+#
+# Ties on the raw scores are common: the formula `1 - x/max_per_state` produces
+# discrete bins (saturated at 1.0 when verified_count == 0; ~22% of districts
+# fall in that single bin), so a naive `rank(method="min")` returns "rank 1
+# (102×)" which is meaningless to a planner picking who to act on first.
+#
+# Break ties with deterministic clinically-meaningful signals:
+#   1) score DESC                — primary
+#   2) phantom_count DESC        — among equal scores, more phantoms = more
+#                                  evidence the district was hidden by fakes
+#   3) verified_facility_count ASC — among equal scores+phantoms, fewer real
+#                                    facilities is worse
+#   4) district_id ASC           — stable last-resort so reruns are reproducible
+# Result: every (capability, district) pair gets a unique rank.
+
+def _ranked(df: pd.DataFrame, score_col: str) -> pd.Series:
+    sort_cols = [score_col, "phantom_count", "verified_facility_count", "district_id"]
+    ascending = [False, False, True, True]
+    sorted_df = df.sort_values(sort_cols, ascending=ascending)
+    sorted_df["__rank"] = sorted_df.groupby("capability").cumcount() + 1
+    return sorted_df["__rank"].astype(int)
+
+desert_scores["raw_rank"]      = _ranked(desert_scores, "raw_desert_score")
+desert_scores["adjusted_rank"] = _ranked(desert_scores, "adjusted_desert_score")
+# Restore original row order before the joins/writes downstream rely on it.
+desert_scores = desert_scores.sort_index()
 # rank_shift > 0: district became MORE underserved after phantom removal (phantoms were hiding it)
 desert_scores["rank_shift"] = desert_scores["raw_rank"] - desert_scores["adjusted_rank"]
 

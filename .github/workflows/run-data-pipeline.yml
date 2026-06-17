@@ -18,7 +18,7 @@ on:
   # "Run workflow" button for workflows present on the default branch).
   # Using a tight path filter lets us kick a run by committing to this
   # workflow file without firing on every push.
-  # (re-trigger: post-merge from main — picks up tile fix, Test 1 demotion, hatchling install)
+  # (re-trigger: unique-rank tiebreaker in lakebase_load — breaks 102-way ties at score=1.0)
   push:
     branches:
       - updated-specs
