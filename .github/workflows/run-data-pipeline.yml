@@ -18,7 +18,7 @@ on:
   # "Run workflow" button for workflows present on the default branch).
   # Using a tight path filter lets us kick a run by committing to this
   # workflow file without firing on every push.
-  # (re-trigger: notebook patched to pass layer_types=("adjusted",) to validator)
+  # (re-trigger: CI SP has Postgres role + GRANT CREATE on public schema)
   push:
     branches:
       - updated-specs
